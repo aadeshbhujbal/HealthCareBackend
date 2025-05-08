@@ -66,7 +66,17 @@ export class AppController {
       // Get recent logs
       const recentLogs = await this.getRecentLogs();
       
-      const services = [
+      // Define the service type
+      interface ServiceItem {
+        name: string;
+        description: string;
+        url: string;
+        active: boolean;
+        category: string;
+        credentials?: string;  // Make credentials optional
+      }
+      
+      const services: ServiceItem[] = [
         {
           name: 'API Documentation',
           description: 'Swagger API documentation and testing interface.',
@@ -80,21 +90,6 @@ export class AppController {
           url: `${baseUrl}${this.configService.get('BULL_BOARD_URL')}`,
           active: healthStatus?.queues?.status === 'up',
           category: 'Monitoring'
-        },
-        {
-          name: 'Redis Commander',
-          description: 'Redis database management interface.',
-          url: `${baseUrl}/redis-ui`,
-          active: healthStatus?.redis?.status === 'up',
-          category: 'Database',
-          credentials: 'Username: admin, Password: admin'
-        },
-        {
-          name: 'Prisma Studio',
-          description: 'PostgreSQL database management through Prisma.',
-          url: `${baseUrl}/prisma`,
-          active: healthStatus?.database?.status === 'up',
-          category: 'Database'
         },
         {
           name: 'Logger',
@@ -111,6 +106,27 @@ export class AppController {
           category: 'API'
         }
       ];
+
+      // Add Redis Commander only in development environment
+      if (process.env.NODE_ENV !== 'production') {
+        services.push({
+          name: 'Redis Commander',
+          description: 'Redis database management interface.',
+          url: `${baseUrl}/redis-ui`,
+          active: healthStatus?.redis?.status === 'up',
+          category: 'Database',
+          credentials: 'Username: admin, Password: admin'
+        });
+        
+        // Add Prisma Studio only in development
+        services.push({
+          name: 'Prisma Studio',
+          description: 'PostgreSQL database management through Prisma.',
+          url: `${baseUrl}/prisma`,
+          active: healthStatus?.database?.status === 'up',
+          category: 'Database'
+        });
+      }
 
       // Conditionally add pgAdmin only in development environment
       if (process.env.NODE_ENV !== 'production') {
@@ -146,6 +162,10 @@ export class AppController {
     description: 'Redirects to Redis Commander UI'
   })
   async getRedisUI(@Res() res: FastifyReply) {
+    // Only allow in development mode
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(404).send('Not available in production');
+    }
     const redisCommanderUrl = this.configService.get<string>('REDIS_COMMANDER_URL');
     return res.redirect(redisCommanderUrl);
   }
@@ -161,8 +181,31 @@ export class AppController {
     description: 'Redirects to Redis Commander UI'
   })
   async getRedisCommander(@Res() res: FastifyReply) {
+    // Only allow in development mode
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(404).send('Not available in production');
+    }
     const redisCommanderUrl = this.configService.get<string>('REDIS_COMMANDER_URL');
     return res.redirect(redisCommanderUrl);
+  }
+
+  @Get('prisma')
+  @Public()
+  @ApiOperation({
+    summary: 'Prisma Studio',
+    description: 'Database management interface for PostgreSQL using Prisma.'
+  })
+  @ApiResponse({
+    status: 302,
+    description: 'Redirects to Prisma Studio UI in development, 404 in production'
+  })
+  async getPrismaStudio(@Res() res: FastifyReply) {
+    // Only allow in development mode
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(404).send('Not available in production');
+    }
+    const prismaStudioUrl = this.configService.get<string>('PRISMA_STUDIO_URL');
+    return res.redirect(prismaStudioUrl);
   }
 
   private async getRecentLogs(limit: number = 10) {

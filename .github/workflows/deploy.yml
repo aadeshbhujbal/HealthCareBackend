@@ -27,7 +27,6 @@ env:
   API_CONTAINER: latest-api
   POSTGRES_CONTAINER: latest-postgres
   REDIS_CONTAINER: latest-redis
-  REDIS_COMMANDER_CONTAINER: latest-redis-commander
   NETWORK_NAME: app-network
 
 jobs:
@@ -89,7 +88,7 @@ jobs:
             echo "Checking required ports..."
             # Use netstat if available, otherwise skip
             if command -v netstat &> /dev/null; then
-              for port in 8088 5432 6379 8082; do
+              for port in 8088 5432 6379; do
                 if netstat -tuln | grep -q ":$port "; then
                   echo "Warning: Port $port is already in use"
                   netstat -tuln | grep ":$port "
@@ -163,7 +162,7 @@ jobs:
             docker volume prune -f
 
             # Remove any existing containers with conflicting names
-            for container in latest-redis latest-postgres latest-api latest-redis-commander; do
+            for container in latest-redis latest-postgres latest-api; do
               if docker ps -a --format '{{.Names}}' | grep -q "^$container$"; then
                 echo "Removing existing container: $container"
                 docker rm -f $container || true
@@ -436,7 +435,7 @@ jobs:
 
             # Wait for containers to be healthy
             echo "Waiting for containers to be healthy..."
-            for container in latest-api latest-postgres latest-redis latest-redis-commander; do
+            for container in latest-api latest-postgres latest-redis; do
               echo "Waiting for $container to be healthy..."
               for i in {1..30}; do
                 if docker ps --filter "name=$container" --format "{{.Status}}" | grep -q "healthy"; then
@@ -458,7 +457,8 @@ jobs:
             sudo ufw allow 80/tcp
             sudo ufw allow 443/tcp
             sudo ufw allow 8088/tcp
-            sudo ufw allow 8082/tcp
+            # Allow Redis port with restrictions for development access
+            sudo ufw allow 6379/tcp
 
             # Update current deployment symlink
             cd ${{ env.DEPLOY_PATH }}
@@ -472,9 +472,7 @@ jobs:
             echo "HTTP (IP): http://${{ env.SERVER_IP }}"
             echo "API Documentation: https://api.ishswami.in/docs"
             echo "Bull Queue Dashboard: https://api.ishswami.in/queue-dashboard"
-            echo "Redis Commander: https://api.ishswami.in/redis-commander/"
             echo "PgAdmin: https://api.ishswami.in/pgadmin/"
-            echo "Prisma Studio: https://api.ishswami.in/prisma/"
             echo "Health Check: https://api.ishswami.in/health"
             echo "============================================="
 
@@ -486,9 +484,7 @@ jobs:
 
             # Setting environment variables directly...
             # Pass environment variables directly to the container
-            docker exec -e REDIS_COMMANDER_URL=/redis-ui \
-                       -e SOCKET_URL=/socket.io \
-                       -e PRISMA_STUDIO_URL=/prisma \
+            docker exec -e SOCKET_URL=/socket.io \
                        -e REDIS_UI_URL=/redis-ui \
                        -e LOGGER_URL=/logger \
                        latest-api sh -c 'echo "Environment variables updated via Docker exec"'
@@ -512,23 +508,6 @@ jobs:
               sleep 5
             done
 
-            # Ensure Prisma Studio is running
-            echo "Checking Prisma Studio status..."
-            if ! docker exec latest-api netstat -tulpn | grep -q ":5555"; then
-              echo "Prisma Studio not detected, attempting to start it..."
-              docker exec latest-api sh -c "cd /app && BROWSER=none npx prisma studio --schema=/app/src/shared/database/prisma/schema.prisma --hostname 0.0.0.0 --port 5555 &"
-              sleep 5
-              
-              if docker exec latest-api netstat -tulpn | grep -q ":5555"; then
-                echo "✅ Prisma Studio successfully started"
-              else
-                echo "⚠️ Prisma Studio failed to start, check logs for details"
-                docker logs latest-api | tail -50
-              fi
-            else
-              echo "✅ Prisma Studio is already running"
-            fi
-
             # Final verification step - check if API is actually accessible
             echo "Performing final verification of the API..."
             # Check the actual health endpoint directly
@@ -546,14 +525,8 @@ jobs:
             echo "Testing Bull Queue Dashboard through Nginx..."
             curl -sk -I https://api.ishswami.in/queue-dashboard | grep "200\|301\|302" && echo "✅ Bull Dashboard accessible" || echo "⚠️ Bull Dashboard test failed"
 
-            echo "Testing Redis Commander through Nginx..."
-            curl -sk -I https://api.ishswami.in/redis-ui/ | grep "200\|301\|302" && echo "✅ Redis Commander accessible" || echo "⚠️ Redis Commander test failed"
-
             echo "Testing Logger through Nginx..."
             curl -sk -I https://api.ishswami.in/logger/ | grep "200\|301\|302" && echo "✅ Logger accessible" || echo "⚠️ Logger test failed"
-
-            echo "Testing Prisma Studio through Nginx..."
-            curl -sk -I https://api.ishswami.in/prisma/ | grep "200\|301\|302" && echo "✅ Prisma Studio accessible" || echo "⚠️ Prisma Studio test failed"
 
             echo "Testing WebSocket through Nginx..."
             curl -sk -I https://api.ishswami.in/socket.io/ | grep "200\|301\|302\|400" && echo "✅ WebSocket endpoint accessible" || echo "⚠️ WebSocket endpoint test failed"
@@ -610,13 +583,6 @@ jobs:
             else
               echo "Error: API health check failed - unexpected response"
               docker logs latest-api --tail 50
-              exit 1
-            fi
-
-            # Check Redis Commander
-            echo "Checking Redis Commander..."
-            if ! curl -s http://localhost:8082 | grep -q "Redis Commander"; then
-              echo "Error: Redis Commander health check failed"
               exit 1
             fi
 

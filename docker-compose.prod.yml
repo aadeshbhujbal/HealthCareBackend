@@ -13,7 +13,6 @@ services:
     hostname: api
     ports:
       - "${API_PORT:-8088}:${API_PORT:-8088}"  # API port
-      - "5555:5555"  # Prisma Studio port
     env_file:
       - .env.production
     volumes:
@@ -25,6 +24,7 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/userdb?schema=public&connection_limit=20&pool_timeout=30
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       TRUST_PROXY: 1
       PRISMA_SCHEMA_PATH: /app/src/shared/database/prisma/schema.prisma
       HOST: 0.0.0.0
@@ -42,7 +42,6 @@ services:
       PRISMA_STUDIO_URL: /prisma
     expose:
       - "${API_PORT:-8088}"
-      - "5555"
     networks:
       app-network:
         ipv4_address: 172.18.0.5
@@ -53,7 +52,6 @@ services:
       - "api:172.18.0.5"
       - "postgres:172.18.0.2"
       - "redis:172.18.0.3"
-      - "redis-commander:172.18.0.4"
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,8 +77,6 @@ services:
              npx prisma migrate deploy --schema=/app/src/shared/database/prisma/schema.prisma &&
              node -e \"const { PrismaClient } = require('@prisma/client'); const prisma = new PrismaClient(); prisma.$connect().then(() => console.log('Prisma connection successful')).catch(e => console.error('Prisma connection failed:', e))\" &&
              mkdir -p /app/logs &&
-             (BROWSER=none npx prisma studio --schema=/app/src/shared/database/prisma/schema.prisma --hostname 0.0.0.0 --port 5555 > /app/logs/prisma.log 2>&1 &) &&
-             sleep 5 && 
              node dist/main.js"
 
   postgres:
@@ -138,7 +134,7 @@ services:
   redis:
     image: redis:7
     container_name: latest-redis
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --protected-mode ${REDIS_PROTECTED_MODE:-no}
     ports:
       - "6379:6379"
     volumes:
@@ -147,7 +143,7 @@ services:
       app-network:
         ipv4_address: 172.18.0.3
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -168,40 +164,6 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-
-  redis-commander:
-    image: rediscommander/redis-commander:latest
-    container_name: latest-redis-commander
-    hostname: redis-commander
-    ports:
-      - "8082:8081"
-    environment:
-      REDIS_HOSTS: local:redis:6379
-      HTTP_USER: ${REDIS_COMMANDER_USER:-admin}
-      HTTP_PASSWORD: ${REDIS_COMMANDER_PASSWORD:-admin}
-      READ_ONLY: "false"
-      FOLDING_CHAR: ":"
-      ROOT_PATTERN: "*"
-    depends_on:
-      - redis
-    networks:
-      app-network:
-        ipv4_address: 172.18.0.4
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8081/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
-    deploy:
-      resources:
-        limits:
-          cpus: '0.2'
-          memory: 256M
-        reservations:
-          cpus: '0.1'
-          memory: 64M
-    restart: always
 
 volumes:
   postgres_data:

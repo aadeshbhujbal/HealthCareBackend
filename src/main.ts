@@ -222,9 +222,8 @@ async function bootstrap() {
       const url = request.url;
       const isAdminPath = url.startsWith('/docs') || 
                           url.startsWith('/queue-dashboard') || 
-                          url.startsWith('/redis-ui') || 
                           url.startsWith('/logger') || 
-                          url.startsWith('/prisma');
+                          (url.startsWith('/prisma') && process.env.NODE_ENV !== 'production');
       
       if (isAdminPath && process.env.NODE_ENV === 'production') {
         // Comment out the authentication check for now to allow access for debugging
@@ -265,11 +264,7 @@ async function bootstrap() {
           reply.header('Location', 'https://api.ishswami.in/queue-dashboard/');
           reply.status(301).send();
           return;
-        } else if (host.includes(':8088/redis-ui')) {
-          reply.header('Location', 'https://api.ishswami.in/redis-ui/');
-          reply.status(301).send();
-          return;
-        } else if (host.includes(':5555')) {
+        } else if (host.includes(':5555') && process.env.NODE_ENV !== 'production') {
           reply.header('Location', 'https://api.ishswami.in/prisma/');
           reply.status(301).send();
           return;
@@ -305,9 +300,7 @@ async function bootstrap() {
         apiUrl: apiUrl || `http://${host}:${port}`,
         swaggerUrl: `${apiUrl}/docs`,
         bullBoardUrl: `${apiUrl}/queue-dashboard`,
-        redisUrl: `${apiUrl}/redis-ui`,
         loggerUrl: `${apiUrl}/logger`,
-        prismaUrl: `${apiUrl}/prisma`,
         websocketUrl: `${apiUrl}/socket`,
         environment: process.env.NODE_ENV || 'development'
       };
@@ -319,7 +312,6 @@ async function bootstrap() {
         'Bootstrap',
         { 
           ...startupInfo,
-          prismaStudioUrl: `${apiUrl}/prisma`,
           socketioUrl: `${apiUrl}/socket.io` 
         }
       );
