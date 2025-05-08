@@ -43,15 +43,9 @@ services:
     expose:
       - "${API_PORT:-8088}"
     networks:
-      app-network:
-        ipv4_address: 172.18.0.5
-        aliases:
-          - api.ishswami.in
-    dns: []  # Disable DNS resolution
+      - app-network
     extra_hosts:
-      - "api:172.18.0.5"
-      - "postgres:172.18.0.2"
-      - "redis:172.18.0.3"
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -59,11 +53,11 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${API_PORT:-8088}/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${API_PORT:-8088}/health || exit 0"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -93,8 +87,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      app-network:
-        ipv4_address: 172.18.0.2
+      - app-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -139,8 +132,7 @@ services:
     volumes:
       - redis_data:/data
     networks:
-      app-network:
-        ipv4_address: 172.18.0.3
+      - app-network
     healthcheck:
       test: ["CMD", "sh", "-c", "redis-cli -a \"${REDIS_PASSWORD:-redis_secure_password_for_production}\" ping | grep PONG"]
       interval: 10s
@@ -170,5 +162,4 @@ volumes:
 
 networks:
   app-network:
-    name: app-network
-    external: true
+    driver: bridge

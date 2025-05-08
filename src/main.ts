@@ -98,12 +98,16 @@ async function bootstrap() {
       const redisConfig = {
         url: `redis://${configService.get('REDIS_HOST', 'localhost')}:${configService.get('REDIS_PORT', '6379')}`,
         password: configService.get('REDIS_PASSWORD', ''),
-        retryStrategy: (times: number) => {
-          const maxDelay = 3000;
-          const delay = Math.min(times * 100, maxDelay);
-          logger.log(`Redis reconnection attempt ${times}, delay: ${delay}ms`);
-          return delay;
-        }
+        socket: {
+          reconnectStrategy: (times: number) => {
+            const maxDelay = 3000;
+            const delay = Math.min(times * 100, maxDelay);
+            logger.log(`Redis reconnection attempt ${times}, delay: ${delay}ms`);
+            return delay;
+          },
+          connectTimeout: 10000
+        },
+        disableOfflineQueue: false
       };
 
       // Create Redis pub/sub clients
@@ -136,14 +140,31 @@ async function bootstrap() {
       pubClient.on('connect', () => handleRedisConnect('Pub'));
       subClient.on('connect', () => handleRedisConnect('Sub'));
       
-      await Promise.all([pubClient.connect(), subClient.connect()]);
+      let redisConnected = false;
+      try {
+        await Promise.all([pubClient.connect(), subClient.connect()]);
+        redisConnected = true;
+      } catch (redisError) {
+        logger.warn('Could not connect to Redis for WebSocket adapter, continuing without Redis adapter:', redisError);
+        await loggingService?.log(
+          LogType.SYSTEM,
+          AppLogLevel.WARN,
+          `Redis adapter initialization skipped due to connection issues: ${redisError.message}`,
+          'Redis',
+          { error: redisError.stack }
+        );
+      }
 
       class CustomIoAdapter extends IoAdapter {
         private adapterConstructor: ReturnType<typeof createAdapter>;
+        private isRedisConnected: boolean;
 
         constructor(app: any) {
           super(app);
-          this.adapterConstructor = createAdapter(pubClient, subClient);
+          this.isRedisConnected = redisConnected;
+          if (this.isRedisConnected) {
+            this.adapterConstructor = createAdapter(pubClient, subClient);
+          }
         }
         
         createIOServer(port: number, options?: any) {
@@ -162,17 +183,38 @@ async function bootstrap() {
             pingTimeout: 60000,
             pingInterval: 25000,
             connectTimeout: 45000,
-            maxHttpBufferSize: 1e6
+            maxHttpBufferSize: 1e6,
+            // Add connection handling
+            connectionStateRecovery: {
+              maxDisconnectionDuration: 2000,
+              skipMiddlewares: true,
+            }
           });
 
-          server.adapter(this.adapterConstructor);
+          try {
+            if (this.isRedisConnected) {
+              server.adapter(this.adapterConstructor);
+              
+              // Handle adapter errors
+              const adapterInstance = server.of('/').adapter;
+              if (adapterInstance && typeof adapterInstance.on === 'function') {
+                adapterInstance.on('error', (error: any) => {
+                  logger.error('Socket.io adapter error:', error);
+                });
+              }
+            }
 
-          // Add health check endpoint for Socket.io
-          server.of('/health').on('connection', (socket) => {
-            socket.emit('health', { status: 'healthy', timestamp: new Date() });
-          });
-
-          return server;
+            // Add health check endpoint for Socket.io
+            server.of('/health').on('connection', (socket) => {
+              socket.emit('health', { status: 'healthy', timestamp: new Date() });
+            });
+            
+            return server;
+          } catch (error) {
+            logger.error('Error configuring Socket.io server:', error);
+            // Return a basic server without the Redis adapter as fallback
+            return super.createIOServer(port, options);
+          }
         }
       }
 
