@@ -17,7 +17,7 @@ services:
       RESET_DB: false
       SWAGGER_URL: /docs
       BULL_BOARD_URL: /queue-dashboard
-      SOCKET_URL: /socket
+      SOCKET_URL: /socket.io
       REDIS_UI_URL: /redis-ui
       REDIS_COMMANDER_URL: /redis-ui
       LOGGER_URL: /logger
