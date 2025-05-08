@@ -59,7 +59,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD wget -q --spider http://localhost:8088/health || exit 1
 
 # Start the application with Prisma Studio
-CMD ["sh", "-c", "npx prisma generate --schema=$PRISMA_SCHEMA_PATH && npx prisma studio --port 5555 --hostname 0.0.0.0 & node dist/main"]
+CMD ["sh", "-c", "npx prisma generate --schema=$PRISMA_SCHEMA_PATH && mkdir -p /app/logs && (BROWSER=none npx prisma studio --schema=$PRISMA_SCHEMA_PATH --port 5555 --hostname 0.0.0.0 > /app/logs/prisma.log 2>&1 &) && sleep 5 && node dist/main"]
 
 # Development stage
 FROM node:20-alpine AS development

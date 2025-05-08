@@ -556,7 +556,7 @@ jobs:
             curl -sk -I https://api.ishswami.in/prisma/ | grep "200\|301\|302" && echo "✅ Prisma Studio accessible" || echo "⚠️ Prisma Studio test failed"
 
             echo "Testing WebSocket through Nginx..."
-            curl -sk -I https://api.ishswami.in/socket/ | grep "200\|301\|302\|400" && echo "✅ WebSocket endpoint accessible" || echo "⚠️ WebSocket endpoint test failed"
+            curl -sk -I https://api.ishswami.in/socket.io/ | grep "200\|301\|302\|400" && echo "✅ WebSocket endpoint accessible" || echo "⚠️ WebSocket endpoint test failed"
 
             # Display container status
             echo "Docker container status:"
