@@ -97,7 +97,7 @@ async function bootstrap() {
       // Redis client configuration
       const redisConfig = {
         url: `redis://${configService.get('REDIS_HOST', 'localhost')}:${configService.get('REDIS_PORT', '6379')}`,
-        password: configService.get('REDIS_PASSWORD'),
+        password: configService.get('REDIS_PASSWORD', ''),
         retryStrategy: (times: number) => {
           const maxDelay = 3000;
           const delay = Math.min(times * 100, maxDelay);

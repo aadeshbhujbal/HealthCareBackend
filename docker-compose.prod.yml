@@ -24,7 +24,7 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/userdb?schema=public&connection_limit=20&pool_timeout=30
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-redis_secure_password_for_production}"
       TRUST_PROXY: 1
       PRISMA_SCHEMA_PATH: /app/src/shared/database/prisma/schema.prisma
       HOST: 0.0.0.0
@@ -134,7 +134,7 @@ services:
   redis:
     image: redis:7
     container_name: latest-redis
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --protected-mode ${REDIS_PROTECTED_MODE:-no}
+    command: redis-server --appendonly yes --requirepass "${REDIS_PASSWORD:-redis_secure_password_for_production}" --protected-mode no
     ports:
       - "6379:6379"
     volumes:
@@ -143,7 +143,7 @@ services:
       app-network:
         ipv4_address: 172.18.0.3
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "sh", "-c", "redis-cli -a \"${REDIS_PASSWORD:-redis_secure_password_for_production}\" ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
