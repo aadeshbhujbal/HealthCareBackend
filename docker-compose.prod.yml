@@ -73,6 +73,11 @@ services:
         npx prisma migrate deploy --schema=/app/src/shared/database/prisma/schema.prisma &&
         node dist/main.js
       "
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
 
   postgres:
     image: postgres:16
@@ -124,6 +129,11 @@ services:
       -c max_parallel_workers_per_gather=2
       -c max_parallel_workers=4
       -c max_parallel_maintenance_workers=2
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
 
   redis:
     image: redis:7
@@ -133,6 +143,8 @@ services:
       --appendonly yes
       --requirepass "${REDIS_PASSWORD:-redis_secure_password_for_production}"
       --protected-mode no
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     volumes:
@@ -161,6 +173,11 @@ services:
       nofile:
         soft: 65535
         hard: 65535
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
 
 volumes:
   postgres_data:
@@ -169,3 +186,7 @@ volumes:
 networks:
   app-network:
     driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.18.0.0/16
