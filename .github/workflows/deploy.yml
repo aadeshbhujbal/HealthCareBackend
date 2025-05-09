@@ -158,24 +158,26 @@ jobs:
 
             # Clean up Docker resources
             echo "Cleaning up Docker resources..."
+            # Stop all running containers first
+            echo "Stopping all running containers..."
+            docker stop $(docker ps -q) || true
+            
+            # Remove all containers
+            echo "Removing all containers..."
+            docker rm -f $(docker ps -aq) || true
+            
+            # Now clean up the system
+            echo "Cleaning up Docker system..."
             docker system prune -f
             docker volume prune -f
-
-            # Remove any existing containers with conflicting names
-            for container in latest-redis latest-postgres latest-api; do
-              if docker ps -a --format '{{.Names}}' | grep -q "^$container$"; then
-                echo "Removing existing container: $container"
-                docker rm -f $container || true
-              fi
-            done
-
+            
             # Handle Docker network
             echo "Setting up Docker network..."
             # Remove all existing networks
             echo "Cleaning up existing networks..."
             docker network prune -f
             docker network rm app-network || true
-
+            
             # Create fresh network
             echo "Creating fresh Docker network..."
             docker network create app-network
