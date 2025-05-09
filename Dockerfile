@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -33,6 +34,7 @@ WORKDIR /app
 # Install production dependencies for native modules
 RUN apt-get update && apt-get install -y \
     openssl \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy built application and node_modules from builder stage
@@ -41,6 +43,9 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY package.json package-lock.json ./
 COPY src/shared/database/prisma ./src/shared/database/prisma
+
+# Create necessary directories
+RUN mkdir -p /app/logs
 
 # Set environment variables
 ENV NODE_ENV=production
@@ -57,13 +62,13 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD wget -q --spider http://localhost:8088/health || exit 1
 
 # Start the application
-CMD ["sh", "-c", "npx prisma generate --schema=$PRISMA_SCHEMA_PATH && mkdir -p /app/logs && node dist/main"]
+CMD ["sh", "-c", "npx prisma generate --schema=$PRISMA_SCHEMA_PATH && node dist/main"]
 
 # Development stage
 FROM node:20-alpine AS development
 
 # Install necessary tools in a single layer
-RUN apk add --no-cache postgresql-client redis busybox-extras python3 make g++ && \
+RUN apk add --no-cache postgresql-client redis busybox-extras python3 make g++ wget && \
     rm -rf /var/cache/apk/*
 
 WORKDIR /app
@@ -80,6 +85,9 @@ COPY . .
 # Set Prisma schema path and generate client
 ENV PRISMA_SCHEMA_PATH=/app/src/shared/database/prisma/schema.prisma
 RUN npx prisma generate --schema=$PRISMA_SCHEMA_PATH
+
+# Create necessary directories
+RUN mkdir -p /app/logs
 
 # Make the script executable
 RUN chmod +x /app/src/shared/database/prisma/wait-for-postgres.sh

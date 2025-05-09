@@ -16,7 +16,7 @@ services:
     env_file:
       - .env.production
     volumes:
-      - ./logs:/app/logs
+      - ./logs:/app/logs:rw
     environment:
       NODE_ENV: production
       CORS_ORIGIN: "*"
@@ -53,7 +53,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${API_PORT:-8088}/health || exit 0"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${API_PORT:-8088}/health"] || exit 0
       interval: 30s
       timeout: 10s
       retries: 3
@@ -67,10 +67,12 @@ services:
           cpus: '0.5'
           memory: 512M
     command: >
-      sh -c "npx prisma generate --schema=/app/src/shared/database/prisma/schema.prisma &&
-             npx prisma migrate deploy --schema=/app/src/shared/database/prisma/schema.prisma &&
-             mkdir -p /app/logs &&
-             node dist/main.js"
+      sh -c "
+        mkdir -p /app/logs &&
+        npx prisma generate --schema=/app/src/shared/database/prisma/schema.prisma &&
+        npx prisma migrate deploy --schema=/app/src/shared/database/prisma/schema.prisma &&
+        node dist/main.js
+      "
 
   postgres:
     image: postgres:16
@@ -103,7 +105,7 @@ services:
           cpus: '0.25'
           memory: 256M
     restart: unless-stopped
-    shm_size: 128mb
+    shm_size: 256mb
     command: >
       postgres
       -c max_connections=100
@@ -126,7 +128,11 @@ services:
   redis:
     image: redis:7
     container_name: latest-redis
-    command: redis-server --appendonly yes --requirepass "${REDIS_PASSWORD:-redis_secure_password_for_production}" --protected-mode no
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass "${REDIS_PASSWORD:-redis_secure_password_for_production}"
+      --protected-mode no
     ports:
       - "6379:6379"
     volumes:
@@ -134,7 +140,7 @@ services:
     networks:
       - app-network
     healthcheck:
-      test: ["CMD", "sh", "-c", "redis-cli -a \"${REDIS_PASSWORD:-redis_secure_password_for_production}\" ping | grep PONG"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secure_password_for_production}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
