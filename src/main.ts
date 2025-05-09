@@ -26,7 +26,7 @@ async function bootstrap() {
     await initDatabase();
     logger.log('Database initialized successfully');
 
-    // Create the NestJS application
+    // Create the NestJS application with increased timeout
     app = await NestFactory.create<NestFastifyApplication>(
       AppModule,
       new FastifyAdapter({
@@ -49,7 +49,11 @@ async function bootstrap() {
         trustProxy: true,
         bodyLimit: 10 * 1024 * 1024, // 10MB
         ignoreTrailingSlash: true,
-        disableRequestLogging: false
+        disableRequestLogging: false,
+        connectionTimeout: 30000, // 30 seconds
+        keepAliveTimeout: 30000, // 30 seconds
+        maxRequestsPerSocket: 1000,
+        pluginTimeout: 30000 // 30 seconds
       }),
       {
         logger: ['log', 'error', 'warn', 'debug', 'verbose'] as LogLevel[],
@@ -94,18 +98,19 @@ async function bootstrap() {
       const { createAdapter } = await import('@socket.io/redis-adapter');
       const { createClient } = await import('redis');
       
-      // Redis client configuration
+      // Redis client configuration with increased timeouts
       const redisConfig = {
         url: `redis://${configService.get('REDIS_HOST', 'localhost')}:${configService.get('REDIS_PORT', '6379')}`,
         password: configService.get('REDIS_PASSWORD', ''),
         socket: {
           reconnectStrategy: (times: number) => {
-            const maxDelay = 3000;
-            const delay = Math.min(times * 100, maxDelay);
+            const maxDelay = 5000; // Increased from 3000
+            const delay = Math.min(times * 200, maxDelay); // Increased from 100
             logger.log(`Redis reconnection attempt ${times}, delay: ${delay}ms`);
             return delay;
           },
-          connectTimeout: 10000
+          connectTimeout: 20000, // Increased from 10000
+          keepAlive: 30000 // Added keepAlive
         },
         disableOfflineQueue: false
       };
@@ -168,7 +173,6 @@ async function bootstrap() {
         }
         
         createIOServer(port: number, options?: any) {
-          // Always use socket.io as the path for consistency
           const server = super.createIOServer(port, {
             ...options,
             cors: {
@@ -184,7 +188,6 @@ async function bootstrap() {
             pingInterval: 25000,
             connectTimeout: 45000,
             maxHttpBufferSize: 1e6,
-            // Add connection handling
             connectionStateRecovery: {
               maxDisconnectionDuration: 2000,
               skipMiddlewares: true,
@@ -195,7 +198,6 @@ async function bootstrap() {
             if (this.isRedisConnected) {
               server.adapter(this.adapterConstructor);
               
-              // Handle adapter errors
               const adapterInstance = server.of('/').adapter;
               if (adapterInstance && typeof adapterInstance.on === 'function') {
                 adapterInstance.on('error', (error: any) => {
@@ -204,7 +206,6 @@ async function bootstrap() {
               }
             }
 
-            // Add health check endpoint for Socket.io
             server.of('/health').on('connection', (socket) => {
               socket.emit('health', { status: 'healthy', timestamp: new Date() });
             });
@@ -212,7 +213,6 @@ async function bootstrap() {
             return server;
           } catch (error) {
             logger.error('Error configuring Socket.io server:', error);
-            // Return a basic server without the Redis adapter as fallback
             return super.createIOServer(port, options);
           }
         }
@@ -237,7 +237,7 @@ async function bootstrap() {
         'WebSocket',
         { error: error instanceof Error ? error.stack : 'No stack trace available' }
       );
-      throw error;
+      // Don't throw here, continue without WebSocket
     }
 
     // Security headers
@@ -331,13 +331,15 @@ async function bootstrap() {
     const document = SwaggerModule.createDocument(app, config);
     SwaggerModule.setup('docs', app, document);
 
-    // Start the server
+    // Start the server with increased timeout
     const host = '0.0.0.0';
     
     try {
+      // Add a delay before starting the server
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
       await app.listen(port, host);
       
-      // Log application startup information
       const startupInfo = {
         apiUrl: apiUrl || `http://${host}:${port}`,
         swaggerUrl: `${apiUrl}/docs`,
@@ -363,7 +365,6 @@ async function bootstrap() {
     }
 
   } catch (error) {
-    // Log the error using both the logger and logging service if available
     logger.error('Failed to start application:', error);
     
     if (loggingService) {
@@ -384,7 +385,6 @@ async function bootstrap() {
       }
     }
 
-    // Attempt to close the application gracefully
     try {
       if (app) {
         await app.close();

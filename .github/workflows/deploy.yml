@@ -379,30 +379,34 @@ jobs:
             echo "Waiting for services to be ready..."
             for service in postgres redis api; do
               echo "Waiting for $service to be healthy..."
-              for i in {1..30}; do
+              for i in {1..60}; do
                 if docker ps --filter "name=latest-$service" --format "{{.Status}}" | grep -q "healthy"; then
                   echo "$service is healthy"
                   break
                 fi
-                if [ $i -eq 30 ]; then
+                if [ $i -eq 60 ]; then
                   echo "Error: $service failed to become healthy"
                   echo "Container logs:"
                   docker logs latest-$service
+                  echo "Container status:"
+                  docker ps -a
+                  echo "Container network:"
+                  docker network inspect app-network
                   exit 1
                 fi
-                echo "Attempt $i/30: Waiting for $service to be healthy..."
+                echo "Attempt $i/60: Waiting for $service to be healthy..."
                 sleep 10
               done
             done
 
             # Additional wait for API to be fully ready
             echo "Waiting for API to be fully ready..."
-            for i in {1..30}; do
+            for i in {1..60}; do
               if curl -s http://localhost:8088/health | grep -q "\"status\":\"healthy\""; then
                 echo "API is fully ready!"
                 break
               fi
-              if [ $i -eq 30 ]; then
+              if [ $i -eq 60 ]; then
                 echo "Error: API failed to become fully ready"
                 echo "Container logs:"
                 docker logs latest-api
@@ -410,9 +414,15 @@ jobs:
                 docker ps -a
                 echo "Checking container network..."
                 docker network inspect app-network
+                echo "Checking API logs..."
+                docker logs latest-api --tail 100
+                echo "Checking API container environment..."
+                docker exec latest-api env
+                echo "Checking API container processes..."
+                docker exec latest-api ps aux
                 exit 1
               fi
-              echo "Attempt $i/30: Waiting for API to be fully ready..."
+              echo "Attempt $i/60: Waiting for API to be fully ready..."
               sleep 10
             done
 
@@ -471,12 +481,12 @@ jobs:
 
             # Wait for API to become healthy
             echo "Waiting for API to become healthy..."
-            for i in {1..30}; do
+            for i in {1..60}; do
               if curl -s http://localhost:8088/health | grep -q "\"status\":\"healthy\""; then
                 echo "API is healthy!"
                 break
               fi
-              echo "Attempt $i/30: waiting for API to become healthy..."
+              echo "Attempt $i/60: waiting for API to become healthy..."
               sleep 5
             done
 

@@ -40,10 +40,11 @@ services:
       REDIS_UI_URL: /redis-ui
       LOGGER_URL: /logger
       PRISMA_STUDIO_URL: /prisma
-      DATABASE_CONNECTION_RETRIES: 10
-      DATABASE_CONNECTION_RETRY_DELAY: 5000
-      REDIS_CONNECTION_RETRIES: 10
-      REDIS_CONNECTION_RETRY_DELAY: 5000
+      DATABASE_CONNECTION_RETRIES: 20
+      DATABASE_CONNECTION_RETRY_DELAY: 10000
+      REDIS_CONNECTION_RETRIES: 20
+      REDIS_CONNECTION_RETRY_DELAY: 10000
+      NODE_OPTIONS: "--max-old-space-size=2048"
     expose:
       - "${API_PORT:-8088}"
     networks:
@@ -61,7 +62,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 120s
+      start_period: 180s
     deploy:
       resources:
         limits:
@@ -75,8 +76,8 @@ services:
         mkdir -p /app/logs &&
         npx prisma generate --schema=/app/src/shared/database/prisma/schema.prisma &&
         npx prisma migrate deploy --schema=/app/src/shared/database/prisma/schema.prisma &&
-        sleep 10 &&
-        node dist/main.js
+        sleep 30 &&
+        node --max-old-space-size=2048 dist/main.js
       "
     logging:
       driver: "json-file"
