@@ -379,41 +379,49 @@ jobs:
               curl -vk https://localhost || true
             fi
 
-            # Start services with fixed container names
-            echo "Starting services..."
-
-            # Install any required build dependencies for bcrypt
-            echo "Installing build dependencies for native modules..."
-            if ! command -v python3 &> /dev/null || ! command -v g++ &> /dev/null || ! command -v make &> /dev/null; then
-              sudo apt-get update
-              sudo apt-get install -y python3 make g++ build-essential
-            fi
-
             # Start Docker services
+            echo "Starting Docker services..."
             docker compose -f docker-compose.prod.yml up -d --force-recreate --build
 
-            # Manually generate Prisma client in the API container to ensure it's available
-            echo "Generating Prisma client in API container..."
-            docker exec latest-api sh -c "npx prisma generate --schema=/app/src/shared/database/prisma/schema.prisma" || true
-
-            # Wait for containers to be healthy
-            echo "Waiting for containers to be healthy..."
-            for container in latest-api latest-postgres latest-redis; do
-              echo "Waiting for $container to be healthy..."
+            # Wait for services to be ready
+            echo "Waiting for services to be ready..."
+            for service in postgres redis api; do
+              echo "Waiting for $service to be healthy..."
               for i in {1..30}; do
-                if docker ps --filter "name=$container" --format "{{.Status}}" | grep -q "healthy"; then
-                  echo "$container is healthy"
+                if docker ps --filter "name=latest-$service" --format "{{.Status}}" | grep -q "healthy"; then
+                  echo "$service is healthy"
                   break
                 fi
                 if [ $i -eq 30 ]; then
-                  echo "Error: $container failed to become healthy"
-                  docker logs $container
+                  echo "Error: $service failed to become healthy"
+                  echo "Container logs:"
+                  docker logs latest-$service
                   exit 1
                 fi
-                echo "Attempt $i/30: Waiting for $container to be healthy..."
+                echo "Attempt $i/30: Waiting for $service to be healthy..."
                 sleep 10
               done
             done
+
+            # Additional wait for API to be fully ready
+            echo "Waiting for API to be fully ready..."
+            for i in {1..30}; do
+              if curl -s http://localhost:8088/health | grep -q "\"status\":\"healthy\""; then
+                echo "API is fully ready!"
+                break
+              fi
+              if [ $i -eq 30 ]; then
+                echo "Error: API failed to become fully ready"
+                docker logs latest-api
+                exit 1
+              fi
+              echo "Attempt $i/30: Waiting for API to be fully ready..."
+              sleep 10
+            done
+
+            # Manually generate Prisma client in the API container
+            echo "Generating Prisma client in API container..."
+            docker exec latest-api sh -c "npx prisma generate --schema=/app/src/shared/database/prisma/schema.prisma" || true
 
             # Configure firewall to allow traffic on ports
             echo "Configuring firewall..."
