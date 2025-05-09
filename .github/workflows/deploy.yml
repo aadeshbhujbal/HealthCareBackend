@@ -169,11 +169,16 @@ jobs:
               fi
             done
 
-            # Create necessary Docker network if it doesn't exist
-            echo "Creating Docker network..."
-            if ! docker network inspect app-network > /dev/null 2>&1; then
-              docker network create app-network --subnet=172.18.0.0/16
-            fi
+            # Handle Docker network
+            echo "Setting up Docker network..."
+            # Remove all existing networks
+            echo "Cleaning up existing networks..."
+            docker network prune -f
+            docker network rm app-network || true
+
+            # Create fresh network
+            echo "Creating fresh Docker network..."
+            docker network create app-network
 
             # Create necessary directories if they don't exist
             mkdir -p current
@@ -229,13 +234,6 @@ jobs:
             SERVER_IP=$(curl -s ifconfig.me)
             if ! grep -q "$SERVER_IP api.ishswami.in" /etc/hosts; then
               echo "$SERVER_IP api.ishswami.in" | sudo tee -a /etc/hosts
-            fi
-
-            # Handle Docker network
-            echo "Setting up Docker network..."
-            if ! docker network inspect app-network > /dev/null 2>&1; then
-              echo "Creating Docker network app-network..."
-              docker network create app-network --subnet=172.18.0.0/16
             fi
 
             # Check if Nginx is installed and configured
