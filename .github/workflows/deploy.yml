@@ -158,24 +158,16 @@ jobs:
 
             # Clean up Docker resources
             echo "Cleaning up Docker resources..."
-            # Stop all running containers first
-            echo "Stopping all running containers..."
-            docker stop $(docker ps -q) || true
+            # Stop only our containers
+            echo "Stopping our containers..."
+            docker stop latest-api latest-postgres latest-redis || true
             
-            # Remove all containers
-            echo "Removing all containers..."
-            docker rm -f $(docker ps -aq) || true
+            # Remove only our containers
+            echo "Removing our containers..."
+            docker rm -f latest-api latest-postgres latest-redis || true
             
-            # Now clean up the system
-            echo "Cleaning up Docker system..."
-            docker system prune -f
-            docker volume prune -f
-            
-            # Handle Docker network
-            echo "Setting up Docker network..."
-            # Remove all existing networks
-            echo "Cleaning up existing networks..."
-            docker network prune -f
+            # Clean up only our network
+            echo "Cleaning up our network..."
             docker network rm app-network || true
             
             # Create fresh network
@@ -412,12 +404,21 @@ jobs:
               fi
               if [ $i -eq 30 ]; then
                 echo "Error: API failed to become fully ready"
+                echo "Container logs:"
                 docker logs latest-api
+                echo "Checking container status..."
+                docker ps -a
+                echo "Checking container network..."
+                docker network inspect app-network
                 exit 1
               fi
               echo "Attempt $i/30: Waiting for API to be fully ready..."
               sleep 10
             done
+
+            # Verify API is responding
+            echo "Verifying API response..."
+            curl -v http://localhost:8088/health
 
             # Manually generate Prisma client in the API container
             echo "Generating Prisma client in API container..."
