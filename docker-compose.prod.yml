@@ -44,7 +44,7 @@ services:
       DATABASE_CONNECTION_RETRY_DELAY: 15000
       REDIS_CONNECTION_RETRIES: 30
       REDIS_CONNECTION_RETRY_DELAY: 15000
-      NODE_OPTIONS: "--max-old-space-size=2048"
+      NODE_OPTIONS: "--max-old-space-size=4096"
     expose:
       - "${API_PORT:-8088}"
     networks:
@@ -67,17 +67,17 @@ services:
       resources:
         limits:
           cpus: '2'
-          memory: 2G
+          memory: 4G
         reservations:
           cpus: '0.5'
-          memory: 512M
+          memory: 1G
     command: >
       sh -c "
         mkdir -p /app/logs &&
         npx prisma generate --schema=/app/src/shared/database/prisma/schema.prisma &&
         npx prisma migrate deploy --schema=/app/src/shared/database/prisma/schema.prisma &&
-        sleep 60 &&
-        node --max-old-space-size=2048 dist/main.js
+        sleep 30 &&
+        node --max-old-space-size=4096 dist/main.js
       "
     logging:
       driver: "json-file"

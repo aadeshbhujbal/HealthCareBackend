@@ -35,6 +35,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     openssl \
     wget \
+    python3 \
+    make \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy built application and node_modules from builder stage
@@ -53,16 +56,17 @@ ENV PRISMA_SCHEMA_PATH=/app/src/shared/database/prisma/schema.prisma
 ENV SOCKET_URL=/socket.io
 ENV REDIS_UI_URL=/redis-ui
 ENV LOGGER_URL=/logger
+ENV NODE_OPTIONS="--max-old-space-size=4096"
 
 # Expose ports
 EXPOSE 8088
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+# Health check with increased timeout
+HEALTHCHECK --interval=30s --timeout=30s --start-period=180s --retries=5 \
     CMD wget -q --spider http://localhost:8088/health || exit 1
 
-# Start the application
-CMD ["sh", "-c", "npx prisma generate --schema=$PRISMA_SCHEMA_PATH && node dist/main"]
+# Start the application with increased memory
+CMD ["sh", "-c", "npx prisma generate --schema=$PRISMA_SCHEMA_PATH && node --max-old-space-size=4096 dist/main"]
 
 # Development stage
 FROM node:20-alpine AS development
