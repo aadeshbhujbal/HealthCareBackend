@@ -43,41 +43,55 @@ async function bootstrap() {
       }
     }
 
-    // Create the NestJS application with increased timeout
+    // Create the NestJS application with increased timeout and better error handling
+    const fastifyInstance = new FastifyAdapter({
+      logger: {
+        level: process.env.NODE_ENV === 'production' ? 'error' : 'debug',
+        serializers: {
+          req: (req) => ({
+            method: req.method,
+            url: req.url,
+            path: req.routerPath,
+            parameters: req.params,
+            headers: req.headers
+          }),
+          res: (res) => ({
+            statusCode: res.statusCode,
+            time: res.responseTime
+          }),
+          err: (err: Error & { code?: string; statusCode?: number }) => ({
+            type: 'Error',
+            code: err.code || 'UNKNOWN',
+            statusCode: err.statusCode || 500,
+            message: err.message,
+            stack: process.env.NODE_ENV === 'production' ? undefined : err.stack
+          })
+        }
+      },
+      trustProxy: true,
+      bodyLimit: 10 * 1024 * 1024, // 10MB
+      ignoreTrailingSlash: true,
+      disableRequestLogging: false,
+      connectionTimeout: 120000, // Increased to 2 minutes
+      keepAliveTimeout: 120000,  // Increased to 2 minutes
+      maxRequestsPerSocket: 1000,
+      pluginTimeout: 120000      // Increased to 2 minutes
+    });
+
+    // Add error handlers to the Fastify instance
+    fastifyInstance.getInstance().addHook('onError', (request, reply, error, done) => {
+      logger.error(`Fastify error: ${error.message}`, error.stack);
+      done();
+    });
+
+    fastifyInstance.getInstance().addHook('onClose', (instance, done) => {
+      logger.log('Fastify instance closing');
+      done();
+    });
+
     app = await NestFactory.create<NestFastifyApplication>(
       AppModule,
-      new FastifyAdapter({
-        logger: {
-          level: process.env.NODE_ENV === 'production' ? 'error' : 'debug',
-          serializers: {
-            req: (req) => ({
-              method: req.method,
-              url: req.url,
-              path: req.routerPath,
-              parameters: req.params,
-              headers: req.headers
-            }),
-            res: (res) => ({
-              statusCode: res.statusCode,
-              time: res.responseTime
-            }),
-            err: (err: Error & { code?: string }) => ({
-              type: 'Error',
-              code: err.code || 'UNKNOWN',
-              message: err.message,
-              stack: process.env.NODE_ENV === 'production' ? undefined : err.stack
-            })
-          }
-        },
-        trustProxy: true,
-        bodyLimit: 10 * 1024 * 1024, // 10MB
-        ignoreTrailingSlash: true,
-        disableRequestLogging: false,
-        connectionTimeout: 60000,
-        keepAliveTimeout: 60000,
-        maxRequestsPerSocket: 1000,
-        pluginTimeout: 60000
-      }),
+      fastifyInstance,
       {
         logger: process.env.NODE_ENV === 'production' 
           ? ['error', 'warn'] 
@@ -92,7 +106,8 @@ async function bootstrap() {
           credentials: true,
           preflightContinue: false,
           optionsSuccessStatus: 204
-        }
+        },
+        abortOnError: false // Prevent immediate shutdown on initialization errors
       }
     );
 
@@ -132,20 +147,27 @@ async function bootstrap() {
           password: configService.get('REDIS_PASSWORD', ''),
           socket: {
             reconnectStrategy: (times: number) => {
-              const maxDelay = 10000;
-              const delay = Math.min(times * 500, maxDelay);
+              const maxDelay = 30000; // Increased max delay
+              const delay = Math.min(times * 1000, maxDelay);
               logger.log(`Redis reconnection attempt ${times}, delay: ${delay}ms`);
               return delay;
             },
-            connectTimeout: 30000,
-            keepAlive: 60000
+            connectTimeout: 60000,    // Increased to 1 minute
+            keepAlive: 120000        // Increased to 2 minutes
           },
           disableOfflineQueue: false,
           retryStrategy: (times: number) => {
-            const delay = Math.min(times * 500, 10000);
+            if (times > 10) {
+              logger.error('Redis retry limit exceeded, failing');
+              return null; // Stop retrying after 10 attempts
+            }
+            const delay = Math.min(times * 1000, 30000);
             logger.log(`Redis retry attempt ${times}, delay: ${delay}ms`);
             return delay;
-          }
+          },
+          maxRetriesPerRequest: 3,
+          enableReadyCheck: true,
+          enableOfflineQueue: true
         };
 
         // Create Redis pub/sub clients with enhanced error handling
@@ -180,21 +202,54 @@ async function bootstrap() {
         pubClient.on('connect', () => handleRedisConnect('Pub'));
         subClient.on('connect', () => handleRedisConnect('Sub'));
         
+        // Add additional event handlers
+        pubClient.on('reconnecting', () => logger.log('Redis Pub client reconnecting'));
+        subClient.on('reconnecting', () => logger.log('Redis Sub client reconnecting'));
+        pubClient.on('ready', () => logger.log('Redis Pub client ready'));
+        subClient.on('ready', () => logger.log('Redis Sub client ready'));
+        
         let redisConnected = false;
         let retryCount = 0;
         const maxRetries = 5;
 
         while (!redisConnected && retryCount < maxRetries) {
           try {
-            await Promise.all([pubClient.connect(), subClient.connect()]);
-            redisConnected = true;
+            await Promise.all([
+              pubClient.connect().catch(err => {
+                logger.error(`Pub client connection error: ${err.message}`);
+                throw err;
+              }),
+              subClient.connect().catch(err => {
+                logger.error(`Sub client connection error: ${err.message}`);
+                throw err;
+              })
+            ]);
+            
+            // Verify connections are actually ready
+            if (pubClient.isReady && subClient.isReady) {
+              redisConnected = true;
+              logger.log('Redis connections established and ready');
+            } else {
+              throw new Error('Redis clients connected but not ready');
+            }
           } catch (redisError) {
             retryCount++;
-            logger.warn(`Redis connection attempt ${retryCount}/${maxRetries} failed:`, redisError);
+            logger.warn(`Redis connection attempt ${retryCount}/${maxRetries} failed: ${redisError.message}`);
+            
+            // Clean up failed connections
+            try {
+              await pubClient.quit().catch(() => {});
+              await subClient.quit().catch(() => {});
+            } catch (cleanupError) {
+              logger.error('Error during Redis connection cleanup:', cleanupError);
+            }
+            
             if (retryCount < maxRetries) {
-              await new Promise(resolve => setTimeout(resolve, 5000 * retryCount));
+              const delay = 5000 * retryCount;
+              logger.log(`Waiting ${delay}ms before next Redis connection attempt`);
+              await new Promise(resolve => setTimeout(resolve, delay));
             } else {
-              throw new Error(`Failed to connect to Redis after ${maxRetries} attempts`);
+              throw new Error(`Failed to connect to Redis after ${maxRetries} attempts: ${redisError.message}`);
             }
           }
         }
