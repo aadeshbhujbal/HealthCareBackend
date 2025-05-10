@@ -61,10 +61,11 @@ async function bootstrap() {
               statusCode: res.statusCode,
               time: res.responseTime
             }),
-            err: (err) => ({
-              type: err.type,
+            err: (err: Error & { code?: string }) => ({
+              type: 'Error',
+              code: err.code || 'UNKNOWN',
               message: err.message,
-              stack: err.stack
+              stack: process.env.NODE_ENV === 'production' ? undefined : err.stack
             })
           }
         },
