@@ -22,6 +22,9 @@ async function bootstrap() {
   let loggingService: LoggingService;
   
   try {
+    // Add initial delay to ensure services are ready
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    
     // Initialize database first
     await initDatabase();
     logger.log('Database initialized successfully');
@@ -50,10 +53,10 @@ async function bootstrap() {
         bodyLimit: 10 * 1024 * 1024, // 10MB
         ignoreTrailingSlash: true,
         disableRequestLogging: false,
-        connectionTimeout: 30000, // 30 seconds
-        keepAliveTimeout: 30000, // 30 seconds
+        connectionTimeout: 60000, // Increased to 60 seconds
+        keepAliveTimeout: 60000, // Increased to 60 seconds
         maxRequestsPerSocket: 1000,
-        pluginTimeout: 30000 // 30 seconds
+        pluginTimeout: 60000 // Increased to 60 seconds
       }),
       {
         logger: ['log', 'error', 'warn', 'debug', 'verbose'] as LogLevel[],
@@ -104,13 +107,13 @@ async function bootstrap() {
         password: configService.get('REDIS_PASSWORD', ''),
         socket: {
           reconnectStrategy: (times: number) => {
-            const maxDelay = 5000; // Increased from 3000
-            const delay = Math.min(times * 200, maxDelay); // Increased from 100
+            const maxDelay = 10000; // Increased to 10 seconds
+            const delay = Math.min(times * 500, maxDelay); // Increased delay between retries
             logger.log(`Redis reconnection attempt ${times}, delay: ${delay}ms`);
             return delay;
           },
-          connectTimeout: 20000, // Increased from 10000
-          keepAlive: 30000 // Added keepAlive
+          connectTimeout: 30000, // Increased to 30 seconds
+          keepAlive: 60000 // Increased to 60 seconds
         },
         disableOfflineQueue: false
       };
@@ -146,18 +149,24 @@ async function bootstrap() {
       subClient.on('connect', () => handleRedisConnect('Sub'));
       
       let redisConnected = false;
-      try {
-        await Promise.all([pubClient.connect(), subClient.connect()]);
-        redisConnected = true;
-      } catch (redisError) {
-        logger.warn('Could not connect to Redis for WebSocket adapter, continuing without Redis adapter:', redisError);
-        await loggingService?.log(
-          LogType.SYSTEM,
-          AppLogLevel.WARN,
-          `Redis adapter initialization skipped due to connection issues: ${redisError.message}`,
-          'Redis',
-          { error: redisError.stack }
-        );
+      let retryCount = 0;
+      const maxRetries = 5;
+
+      while (!redisConnected && retryCount < maxRetries) {
+        try {
+          await Promise.all([pubClient.connect(), subClient.connect()]);
+          redisConnected = true;
+        } catch (redisError) {
+          retryCount++;
+          logger.warn(`Redis connection attempt ${retryCount} failed:`, redisError);
+          if (retryCount < maxRetries) {
+            await new Promise(resolve => setTimeout(resolve, 5000 * retryCount));
+          }
+        }
+      }
+
+      if (!redisConnected) {
+        throw new Error('Failed to connect to Redis after multiple attempts');
       }
 
       class CustomIoAdapter extends IoAdapter {
@@ -184,12 +193,12 @@ async function bootstrap() {
             serveClient: false,
             transports: ['websocket', 'polling'],
             allowEIO3: true,
-            pingTimeout: 60000,
-            pingInterval: 25000,
-            connectTimeout: 45000,
+            pingTimeout: 120000, // Increased to 120 seconds
+            pingInterval: 30000, // Increased to 30 seconds
+            connectTimeout: 60000, // Increased to 60 seconds
             maxHttpBufferSize: 1e6,
             connectionStateRecovery: {
-              maxDisconnectionDuration: 2000,
+              maxDisconnectionDuration: 5000, // Increased to 5 seconds
               skipMiddlewares: true,
             }
           });
@@ -336,7 +345,7 @@ async function bootstrap() {
     
     try {
       // Add a delay before starting the server
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      await new Promise(resolve => setTimeout(resolve, 10000));
       
       await app.listen(port, host);
       

@@ -40,10 +40,10 @@ services:
       REDIS_UI_URL: /redis-ui
       LOGGER_URL: /logger
       PRISMA_STUDIO_URL: /prisma
-      DATABASE_CONNECTION_RETRIES: 20
-      DATABASE_CONNECTION_RETRY_DELAY: 10000
-      REDIS_CONNECTION_RETRIES: 20
-      REDIS_CONNECTION_RETRY_DELAY: 10000
+      DATABASE_CONNECTION_RETRIES: 30
+      DATABASE_CONNECTION_RETRY_DELAY: 15000
+      REDIS_CONNECTION_RETRIES: 30
+      REDIS_CONNECTION_RETRY_DELAY: 15000
       NODE_OPTIONS: "--max-old-space-size=2048"
     expose:
       - "${API_PORT:-8088}"
@@ -76,7 +76,7 @@ services:
         mkdir -p /app/logs &&
         npx prisma generate --schema=/app/src/shared/database/prisma/schema.prisma &&
         npx prisma migrate deploy --schema=/app/src/shared/database/prisma/schema.prisma &&
-        sleep 30 &&
+        sleep 60 &&
         node --max-old-space-size=2048 dist/main.js
       "
     logging:
