@@ -1,225 +1,261 @@
 #!/bin/bash
-# Healthcare App Server Maintenance Script
+# Healthcare API Server Maintenance Script
 # This script performs routine server maintenance tasks
 
 set -e
 
-# Source shared configuration
-source "$(dirname "$0")/backup-config.sh"
+# Source backup configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/backup-config.sh" ]; then
+    source "$SCRIPT_DIR/backup-config.sh"
+else
+    echo "Error: backup-config.sh not found in $SCRIPT_DIR"
+    exit 1
+fi
 
-# Function to check disk space
-check_disk_space() {
-  local threshold=$1
-  local mount_point=$2
-  
-  log_message "$MAINTENANCE_LOG" "Checking disk space for $mount_point..."
-  
-  local disk_usage
-  disk_usage=$(df -h "$mount_point" | tail -1 | awk '{print $5}' | tr -d '%')
-  
-  if [ "$disk_usage" -gt "$threshold" ]; then
-    log_error "$MAINTENANCE_LOG" "Disk usage is critical: ${disk_usage}% (threshold: ${threshold}%)"
+# Additional maintenance settings
+DOCKER_PRUNE_DAYS=7
+LOG_RETENTION_DAYS=30
+MAINTENANCE_WINDOW_START=1  # 1 AM
+MAINTENANCE_WINDOW_END=5    # 5 AM
+MAX_LOG_SIZE_MB=100
+NGINX_LOG_DIR="/var/log/nginx"
+DOCKER_LOG_DIR="/var/lib/docker/containers"
+
+# Function to check if we're in the maintenance window
+check_maintenance_window() {
+    local current_hour
+    current_hour=$(date +%H)
+    
+    if [ "$current_hour" -ge "$MAINTENANCE_WINDOW_START" ] && [ "$current_hour" -lt "$MAINTENANCE_WINDOW_END" ]; then
+        return 0
+    else
+        log_error "Current time $(date) is outside maintenance window ($MAINTENANCE_WINDOW_START:00-$MAINTENANCE_WINDOW_END:00)"
     return 1
-  else
-    log_message "$MAINTENANCE_LOG" "Disk usage is normal: ${disk_usage}%"
-    return 0
-  fi
+    fi
 }
 
-# Function to clean up Docker resources
+# Function to check and rotate logs
+rotate_logs() {
+    log_info "Starting log rotation"
+    
+    # Rotate application logs
+    find "$LOG_DIR" -type f -name "*.log" | while read -r log_file; do
+        local size_mb
+        size_mb=$(du -m "$log_file" | cut -f1)
+        
+        if [ "$size_mb" -gt "$MAX_LOG_SIZE_MB" ]; then
+            log_info "Rotating log file: $log_file (${size_mb}MB)"
+            mv "$log_file" "${log_file}.$(date +%Y%m%d)"
+            gzip "${log_file}.$(date +%Y%m%d)"
+            touch "$log_file"
+        fi
+    done
+    
+    # Rotate Nginx logs
+    if [ -d "$NGINX_LOG_DIR" ]; then
+        log_info "Rotating Nginx logs"
+        logrotate -f /etc/logrotate.d/nginx
+    fi
+    
+    # Cleanup old rotated logs
+    find "$LOG_DIR" -type f -name "*.gz" -mtime +"$LOG_RETENTION_DAYS" -delete
+    
+    log_info "Log rotation completed"
+}
+
+# Function to cleanup Docker resources
 cleanup_docker() {
-  log_message "$MAINTENANCE_LOG" "Cleaning up Docker resources..."
+    log_info "Starting Docker cleanup"
   
   # Remove unused containers
-  log_message "$MAINTENANCE_LOG" "Removing unused containers..."
-  docker container prune -f
+    log_info "Removing unused containers"
+    docker container prune -f --filter "until=${DOCKER_PRUNE_DAYS}d"
   
   # Remove unused images
-  log_message "$MAINTENANCE_LOG" "Removing unused images..."
-  docker image prune -f
+    log_info "Removing unused images"
+    docker image prune -a -f --filter "until=${DOCKER_PRUNE_DAYS}d"
   
   # Remove unused volumes
-  log_message "$MAINTENANCE_LOG" "Removing unused volumes..."
+    log_info "Removing unused volumes"
   docker volume prune -f
   
   # Remove unused networks
-  log_message "$MAINTENANCE_LOG" "Removing unused networks..."
-  docker network prune -f
-  
-  log_message "$MAINTENANCE_LOG" "Docker cleanup completed"
-}
-
-# Function to clean up old logs
-cleanup_logs() {
-  log_message "$MAINTENANCE_LOG" "Cleaning up old log files..."
-  
-  # Clean up logs older than 30 days
-  find "$LOG_DIR" -name "*.log" -type f -mtime +30 -delete
-  
-  # Compress logs older than 7 days but younger than 30 days
-  find "$LOG_DIR" -name "*.log" -type f -mtime +7 -mtime -30 -exec gzip -f {} \;
-  
-  log_message "$MAINTENANCE_LOG" "Log cleanup completed"
-}
-
-# Function to verify and repair backup integrity
-verify_backups() {
-  log_message "$MAINTENANCE_LOG" "Verifying backup integrity..."
-  
-  local error_count=0
-  
-  # Check local backups
-  log_message "$MAINTENANCE_LOG" "Checking local backups..."
-  
-  # Verify application backups
-  if [ -d "$BACKUP_DIR" ]; then
-    for backup in "$BACKUP_DIR"/*; do
-      if [ -d "$backup" ] && [ "$(basename "$backup")" != "." ] && [ "$(basename "$backup")" != ".." ]; then
-        if [ -f "$backup.tar.gz" ]; then
-          if ! tar -tzf "$backup.tar.gz" >/dev/null 2>&1; then
-            log_error "$MAINTENANCE_LOG" "Corrupted application backup: $backup"
-            error_count=$((error_count + 1))
-          fi
-        fi
-      fi
-    done
-  fi
-  
-  # Verify database backups
-  if [ -d "$DB_BACKUP_DIR" ]; then
-    for backup in "$DB_BACKUP_DIR"/*.sql.gz; do
-      if [ -f "$backup" ]; then
-        if ! gzip -t "$backup" 2>/dev/null; then
-          log_error "$MAINTENANCE_LOG" "Corrupted database backup: $backup"
-          error_count=$((error_count + 1))
-        fi
-      fi
-    done
-  fi
-  
-  # Check Google Drive backups
-  log_message "$MAINTENANCE_LOG" "Checking Google Drive backups..."
-  
-  # Verify application backups in Google Drive
-  local gdrive_app_backups
-  gdrive_app_backups=$(rclone lsf "gdrive:$GDRIVE_APP_BACKUP_DIR")
-  for backup in $gdrive_app_backups; do
-    if ! rclone cat "gdrive:$GDRIVE_APP_BACKUP_DIR/$backup" 2>/dev/null | tar -tz >/dev/null 2>&1; then
-      log_error "$MAINTENANCE_LOG" "Corrupted application backup in Google Drive: $backup"
-      error_count=$((error_count + 1))
+    log_info "Removing unused networks"
+    docker network prune -f --filter "until=${DOCKER_PRUNE_DAYS}d"
+    
+    # Cleanup Docker logs
+    if [ -d "$DOCKER_LOG_DIR" ]; then
+        log_info "Cleaning up Docker container logs"
+        find "$DOCKER_LOG_DIR" -type f -name "*.log" -mtime +"$LOG_RETENTION_DAYS" -delete
     fi
-  done
-  
-  # Verify database backups in Google Drive
-  local gdrive_db_backups
-  gdrive_db_backups=$(rclone lsf "gdrive:$GDRIVE_DB_BACKUP_DIR")
-  for backup in $gdrive_db_backups; do
-    if ! rclone cat "gdrive:$GDRIVE_DB_BACKUP_DIR/$backup" 2>/dev/null | gzip -t 2>/dev/null; then
-      log_error "$MAINTENANCE_LOG" "Corrupted database backup in Google Drive: $backup"
-      error_count=$((error_count + 1))
-    fi
-  done
-  
-  if [ "$error_count" -gt 0 ]; then
-    log_error "$MAINTENANCE_LOG" "Found $error_count corrupted backup(s)"
-    return 1
-  else
-    log_message "$MAINTENANCE_LOG" "All backups verified successfully"
-    return 0
-  fi
+    
+    log_info "Docker cleanup completed"
 }
 
-# Function to sync backups between local and Google Drive
-sync_backups() {
-  log_message "$MAINTENANCE_LOG" "Syncing backups between local and Google Drive..."
-  
-  # Sync application backups
-  log_message "$MAINTENANCE_LOG" "Syncing application backups..."
-  if [ -d "$BACKUP_DIR" ]; then
-    for backup in "$BACKUP_DIR"/*; do
-      if [ -d "$backup" ] && [ "$(basename "$backup")" != "." ] && [ "$(basename "$backup")" != ".." ]; then
-        local backup_name=$(basename "$backup")
-        if ! verify_backup_exists "$backup_name" "application"; then
-          log_message "$MAINTENANCE_LOG" "Syncing missing application backup: $backup_name"
-          sync_backup "$backup_name" "application" "to_gdrive"
+# Function to check and cleanup disk space
+cleanup_disk() {
+    log_info "Starting disk cleanup"
+    
+    # Get disk usage
+    local disk_usage
+    disk_usage=$(df -h / | awk 'NR==2 {print $5}' | sed 's/%//')
+    
+    if [ "$disk_usage" -gt 85 ]; then
+        log_error "High disk usage: ${disk_usage}%"
+        
+        # Emergency cleanup actions
+        log_info "Performing emergency cleanup"
+        
+        # Clear package manager cache
+        if command -v apt-get &> /dev/null; then
+            apt-get clean
+            apt-get autoremove -y
         fi
-      fi
-    done
-  fi
-  
-  # Sync database backups
-  log_message "$MAINTENANCE_LOG" "Syncing database backups..."
-  if [ -d "$DB_BACKUP_DIR" ]; then
-    for backup in "$DB_BACKUP_DIR"/*.sql.gz; do
-      if [ -f "$backup" ]; then
-        local backup_name=$(basename "$backup")
-        if ! verify_backup_exists "$backup_name" "database"; then
-          log_message "$MAINTENANCE_LOG" "Syncing missing database backup: $backup_name"
-          sync_backup "$backup_name" "database" "to_gdrive"
+        
+        # Clear temporary files
+        rm -rf /tmp/*
+        
+        # Clear old journal logs
+        if command -v journalctl &> /dev/null; then
+            journalctl --vacuum-time=7d
         fi
-        fi
-      done
     fi
-  
-  log_message "$MAINTENANCE_LOG" "Backup sync completed"
+    
+    log_info "Disk cleanup completed"
 }
 
-# Function to check and repair file permissions
-check_permissions() {
-  log_message "$MAINTENANCE_LOG" "Checking and repairing file permissions..."
-  
-  # Fix backup directory permissions
-  if [ -d "$BACKUP_DIR" ]; then
-    chmod 755 "$BACKUP_DIR"
-    chown -R www-data:www-data "$BACKUP_DIR"
-  fi
-  
-  # Fix database backup directory permissions
-  if [ -d "$DB_BACKUP_DIR" ]; then
-    chmod 700 "$DB_BACKUP_DIR"
-    chown -R www-data:www-data "$DB_BACKUP_DIR"
-  fi
-  
-  # Fix log directory permissions
-  if [ -d "$LOG_DIR" ]; then
-    chmod 755 "$LOG_DIR"
-    chown -R www-data:www-data "$LOG_DIR"
-    find "$LOG_DIR" -type f -exec chmod 644 {} \;
-  fi
-  
-  log_message "$MAINTENANCE_LOG" "File permissions check completed"
+# Function to check system health
+check_system_health() {
+    log_info "Starting system health check"
+    
+    # Check memory usage
+    local memory_usage
+    memory_usage=$(free | awk '/Mem:/ {print int($3/$2 * 100)}')
+    log_info "Memory usage: ${memory_usage}%"
+    
+    # Check swap usage
+    local swap_usage
+    swap_usage=$(free | awk '/Swap:/ {print int($3/$2 * 100)}')
+    log_info "Swap usage: ${swap_usage}%"
+    
+    # Check load average
+    local load_average
+    load_average=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}')
+    log_info "Load average: $load_average"
+    
+    # Check disk usage
+    log_info "Disk usage:"
+    df -h | grep -v "tmpfs" | grep -v "udev"
+    
+    # Check for zombie processes
+    local zombie_count
+    zombie_count=$(ps aux | awk '{print $8}' | grep -c "Z")
+    if [ "$zombie_count" -gt 0 ]; then
+        log_error "Found $zombie_count zombie processes"
+    fi
+    
+    # Check system services
+    log_info "Checking system services"
+    systemctl --failed
+    
+    # Check Docker service status
+    if systemctl is-active --quiet docker; then
+        log_info "Docker service is running"
+    else
+        log_error "Docker service is not running"
+    fi
+    
+    # Check container health
+    log_info "Checking container health"
+    docker ps --format "table {{.Names}}\t{{.Status}}"
+    
+    log_info "System health check completed"
+}
+
+# Function to update system packages
+update_system() {
+    log_info "Starting system update"
+    
+    # Update package list
+    if command -v apt-get &> /dev/null; then
+        log_info "Updating package list"
+        apt-get update
+        
+        # Check for security updates
+        if command -v unattended-upgrade &> /dev/null; then
+            log_info "Installing security updates"
+            unattended-upgrade --download-only
+            unattended-upgrade
+        fi
+    fi
+    
+    log_info "System update completed"
+}
+
+# Function to verify application status
+verify_application() {
+    log_info "Verifying application status"
+    
+    # Check API container
+    if docker ps | grep -q "latest-api"; then
+        log_info "API container is running"
+        
+        # Check API health
+        if curl -s -f http://localhost:8088/health > /dev/null; then
+            log_info "API health check passed"
+        else
+            log_error "API health check failed"
+        fi
+    else
+        log_error "API container is not running"
+    fi
+    
+    # Check database containers
+    if docker ps | grep -q "$POSTGRES_CONTAINER"; then
+        log_info "PostgreSQL container is running"
+    else
+        log_error "PostgreSQL container is not running"
+    fi
+    
+    if [ "$REDIS_BACKUP_ENABLED" = true ] && ! docker ps | grep -q "$REDIS_CONTAINER"; then
+        log_error "Redis container is not running"
+    fi
+    
+    log_info "Application verification completed"
 }
 
 # Main execution
-log_message "$MAINTENANCE_LOG" "====================== SERVER MAINTENANCE STARTED ======================"
-
-# Initialize error flag
-ERROR_FLAG=0
-
-# Check disk space
-if ! check_disk_space 80 "/"; then
-  ERROR_FLAG=1
-fi
-
-# Clean up Docker resources
-cleanup_docker || ERROR_FLAG=1
-
-# Clean up logs
-cleanup_logs || ERROR_FLAG=1
-
-# Verify backups
-verify_backups || ERROR_FLAG=1
-
-# Sync backups
-sync_backups || ERROR_FLAG=1
-
-# Check permissions
-check_permissions || ERROR_FLAG=1
-
-if [ $ERROR_FLAG -eq 0 ]; then
-  log_message "$MAINTENANCE_LOG" "✅ Server maintenance completed successfully"
+main() {
+    log_info "========== SERVER MAINTENANCE STARTED =========="
+    
+    # Check if we're in the maintenance window
+    if ! check_maintenance_window; then
+        exit 1
+    fi
+    
+    # Perform maintenance tasks
+    rotate_logs
+    cleanup_docker
+    cleanup_disk
+    check_system_health
+    update_system
+    verify_application
+    
+    log_info "✅ Server maintenance completed successfully"
   exit 0
-else
-  log_error "$MAINTENANCE_LOG" "❌ Server maintenance completed with errors"
-  exit 1
-fi 
+}
+
+# Error handler
+error_handler() {
+    local line_no=$1
+    local error_code=$2
+    local command=$3
+    log_error "Error occurred in command '$command' at line $line_no (Exit code: $error_code)"
+}
+
+# Set up error handling
+trap 'error_handler ${LINENO} $? "$BASH_COMMAND"' ERR
+
+# Execute main function
+main "$@" 

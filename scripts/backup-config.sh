@@ -1,139 +1,251 @@
 #!/bin/bash
-# Shared configuration for backup and rollback scripts
+# Healthcare API Backup Configuration
+# This script defines configuration variables and utility functions for backup operations
 
-# Base directories
-APP_DIR="/var/www/healthcare/backend"
-BACKUP_DIR="$APP_DIR/backups"
-DB_BACKUP_DIR="/var/backups/postgres"
-RELEASES_DIR="$APP_DIR/releases"
-CURRENT_LINK="$APP_DIR/current"
-
-# File paths
-SUCCESSFUL_DEPLOYMENTS_FILE="$APP_DIR/successful_deployments.txt"
-LATEST_BACKUP_MARKER="$BACKUP_DIR/latest_backup"
+# Base paths
+export APP_DIR="/var/www/healthcare/backend"
+export RELEASES_DIR="$APP_DIR/releases"
+export CURRENT_LINK="$APP_DIR/current"
+export BACKUP_DIR="$APP_DIR/backups"
+export LOG_DIR="/var/log/healthcare"
+export DB_BACKUP_DIR="/var/backups/postgres"
 
 # Log files
-LOG_DIR="/var/log/healthcare"
-BACKUP_LOG="$LOG_DIR/backup.log"
-OFFSITE_LOG="$LOG_DIR/offsite-backup.log"
-ROLLBACK_LOG="$LOG_DIR/rollback.log"
-MAINTENANCE_LOG="$LOG_DIR/maintenance.log"
-DEBUG_LOG="$LOG_DIR/debug.log"
+export BACKUP_LOG="$LOG_DIR/backup.log"
+export ROLLBACK_LOG="$LOG_DIR/rollback.log"
+export DEBUG_LOG="$LOG_DIR/debug.log"
 
-# Retention settings
-RETENTION_COUNT=5  # Number of backups/releases to keep
-DB_RETENTION_DAYS=30  # Days to keep database backups
-EMERGENCY_RETENTION=3  # Minimum backups to keep in emergency cleanup
+# Deployment tracking
+export SUCCESSFUL_DEPLOYMENTS_FILE="$APP_DIR/successful_deployments.txt"
 
-# Google Drive settings
-GDRIVE_BACKUP_ROOT="HealthcareBackups"
-GDRIVE_APP_BACKUP_DIR="$GDRIVE_BACKUP_ROOT/application"
-GDRIVE_DB_BACKUP_DIR="$GDRIVE_BACKUP_ROOT/database"
-GDRIVE_REPORTS_DIR="$GDRIVE_BACKUP_ROOT/reports"
+# Backup retention settings
+export LOCAL_RETENTION_DAYS=7
+export CLOUD_RETENTION_DAYS=30
+export MIN_BACKUPS_TO_KEEP=3
+export MAX_BACKUPS_TO_KEEP=10
 
-# Database settings
-DB_CONTAINER="latest-postgres"
-DB_NAME="userdb"
-DB_USER="postgres"
+# Database backup settings
+export DB_BACKUP_RETENTION_DAYS=14
+export DB_MIN_BACKUPS=5
+export POSTGRES_CONTAINER="latest-postgres"
+export POSTGRES_DB="healthcare"
+export POSTGRES_USER="postgres"
 
-# Function to log messages
+# Redis backup settings
+export REDIS_BACKUP_ENABLED=true
+export REDIS_CONTAINER="latest-redis"
+export REDIS_BACKUP_TTL=604800  # 7 days in seconds
+
+# Backup compression settings
+export COMPRESSION_ENABLED=true
+export COMPRESSION_LEVEL=9
+export BACKUP_FORMAT="tar.gz"
+
+# Cloud storage settings (Google Drive)
+export GDRIVE_ENABLED=true
+export GDRIVE_APP_BACKUP_DIR="healthcare_backups/app"
+export GDRIVE_DB_BACKUP_DIR="healthcare_backups/db"
+export GDRIVE_SYNC_INTERVAL=3600  # 1 hour in seconds
+
+# Health check settings
+export HEALTH_CHECK_TIMEOUT=300  # 5 minutes
+export HEALTH_CHECK_INTERVAL=10  # 10 seconds between checks
+export MAX_HEALTH_CHECK_ATTEMPTS=30
+
+# Error handling settings
+export MAX_RETRY_ATTEMPTS=3
+export RETRY_DELAY=5  # seconds
+
+# Ensure required directories exist
+ensure_directories() {
+    local dirs=(
+        "$APP_DIR"
+        "$RELEASES_DIR"
+        "$BACKUP_DIR"
+        "$LOG_DIR"
+        "$DB_BACKUP_DIR"
+        "$(dirname "$SUCCESSFUL_DEPLOYMENTS_FILE")"
+    )
+    
+    for dir in "${dirs[@]}"; do
+        if [ ! -d "$dir" ]; then
+            mkdir -p "$dir"
+            chmod 755 "$dir"
+        fi
+    done
+}
+
+# Logging functions
 log_message() {
-  local log_file="$1"
-  local message="$2"
-  local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-  echo "[$timestamp] $message" | tee -a "$log_file"
+    local level=$1
+    local message=$2
+    local log_file=$3
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message" | tee -a "$log_file"
 }
 
-# Function to log errors
+log_info() {
+    log_message "INFO" "$1" "$BACKUP_LOG"
+}
+
 log_error() {
-  local log_file="$1"
-  local message="$2"
-  log_message "$log_file" "ERROR: $message"
+    log_message "ERROR" "$1" "$BACKUP_LOG"
+    log_message "ERROR" "$1" "$DEBUG_LOG"
 }
 
-# Function to log debug information
 log_debug() {
-  local message="$1"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: $message" >> "$DEBUG_LOG"
+    log_message "DEBUG" "$1" "$DEBUG_LOG"
 }
 
-# Function to ensure directories exist
-ensure_backup_dirs() {
-  mkdir -p "$LOG_DIR" "$BACKUP_DIR" "$DB_BACKUP_DIR"
-  chmod 755 "$LOG_DIR" "$BACKUP_DIR"
-  chown -R www-data:www-data "$DB_BACKUP_DIR"
+# Function to validate backup configuration
+validate_config() {
+    local errors=0
+    
+    # Validate directory paths
+    for dir in "$APP_DIR" "$RELEASES_DIR" "$BACKUP_DIR" "$LOG_DIR" "$DB_BACKUP_DIR"; do
+        if [ ! -d "$dir" ]; then
+            log_error "Directory $dir does not exist"
+            errors=$((errors + 1))
+        fi
+    done
+    
+    # Validate retention settings
+    if [ "$LOCAL_RETENTION_DAYS" -lt 1 ]; then
+        log_error "LOCAL_RETENTION_DAYS must be at least 1"
+        errors=$((errors + 1))
+    fi
+    
+    if [ "$MIN_BACKUPS_TO_KEEP" -gt "$MAX_BACKUPS_TO_KEEP" ]; then
+        log_error "MIN_BACKUPS_TO_KEEP cannot be greater than MAX_BACKUPS_TO_KEEP"
+        errors=$((errors + 1))
+    fi
+    
+    # Validate database settings
+    if ! docker ps | grep -q "$POSTGRES_CONTAINER"; then
+        log_error "PostgreSQL container $POSTGRES_CONTAINER not found"
+        errors=$((errors + 1))
+    fi
+    
+    if [ "$REDIS_BACKUP_ENABLED" = true ] && ! docker ps | grep -q "$REDIS_CONTAINER"; then
+        log_error "Redis container $REDIS_CONTAINER not found"
+        errors=$((errors + 1))
+    fi
+    
+    # Validate cloud storage settings
+    if [ "$GDRIVE_ENABLED" = true ]; then
+        if ! command -v rclone &> /dev/null; then
+            log_error "rclone not found but GDRIVE_ENABLED is true"
+            errors=$((errors + 1))
+        fi
+    fi
+    
+    return $errors
 }
 
-# Function to get latest successful deployment
-get_latest_successful_deployment() {
-  if [ -f "$SUCCESSFUL_DEPLOYMENTS_FILE" ]; then
-    tail -n 1 "$SUCCESSFUL_DEPLOYMENTS_FILE"
-  else
-    return 1
-  fi
+# Function to check available disk space
+check_disk_space() {
+    local min_space_mb=500  # Minimum required space in MB
+    local available_space
+    
+    available_space=$(df -m "$BACKUP_DIR" | awk 'NR==2 {print $4}')
+    if [ "$available_space" -lt "$min_space_mb" ]; then
+        log_error "Insufficient disk space. Available: ${available_space}MB, Required: ${min_space_mb}MB"
+        return 1
+    fi
+    return 0
 }
 
-# Function to verify backup exists in both locations
-verify_backup_exists() {
-  local backup_name="$1"
-  local backup_type="$2"  # 'application' or 'database'
-  local local_path
-  local gdrive_path
-  
-  case "$backup_type" in
-    "application")
-      local_path="$BACKUP_DIR/$backup_name"
-      gdrive_path="$GDRIVE_APP_BACKUP_DIR/$backup_name"
-      ;;
-    "database")
-      local_path="$DB_BACKUP_DIR/$backup_name"
-      gdrive_path="$GDRIVE_DB_BACKUP_DIR/$backup_name"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-  
-  # Check local existence
-  [ -e "$local_path" ] && \
-  # Check Google Drive existence
-  rclone lsf "gdrive:$gdrive_path" >/dev/null 2>&1
+# Function to verify backup integrity
+verify_backup() {
+    local backup_file=$1
+    local backup_type=$2
+    
+    case "$backup_type" in
+        "application")
+            if [ ! -f "$backup_file" ]; then
+                log_error "Backup file $backup_file not found"
+                return 1
+            fi
+            if ! tar -tzf "$backup_file" &> /dev/null; then
+                log_error "Backup file $backup_file is corrupted"
+                return 1
+            fi
+            ;;
+        "database")
+            if [ ! -f "$backup_file" ]; then
+                log_error "Database backup file $backup_file not found"
+                return 1
+            fi
+            if [[ "$backup_file" == *.gz ]] && ! gunzip -t "$backup_file" &> /dev/null; then
+                log_error "Database backup file $backup_file is corrupted"
+                return 1
+            fi
+            ;;
+        *)
+            log_error "Unknown backup type: $backup_type"
+            return 1
+            ;;
+    esac
+    
+    return 0
 }
 
-# Function to sync backup between locations
-sync_backup() {
-  local backup_name="$1"
-  local backup_type="$2"  # 'application' or 'database'
-  local direction="$3"    # 'to_gdrive' or 'from_gdrive'
-  local local_path
-  local gdrive_path
-  
-  case "$backup_type" in
-    "application")
-      local_path="$BACKUP_DIR/$backup_name"
-      gdrive_path="$GDRIVE_APP_BACKUP_DIR/$backup_name"
-      ;;
-    "database")
-      local_path="$DB_BACKUP_DIR/$backup_name"
-      gdrive_path="$GDRIVE_DB_BACKUP_DIR/$backup_name"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-  
-  case "$direction" in
-    "to_gdrive")
-      rclone copy --transfers 4 --progress "$local_path" "gdrive:$gdrive_path"
-      ;;
-    "from_gdrive")
-      rclone copy --transfers 4 --progress "gdrive:$gdrive_path" "$local_path"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+# Function to cleanup old backups
+cleanup_old_backups() {
+    local backup_dir=$1
+    local retention_days=$2
+    local min_keep=$3
+    
+    # Find and delete old backups
+    find "$backup_dir" -type f -mtime +"$retention_days" -name "*.$BACKUP_FORMAT" | while read -r backup; do
+        # Always keep minimum number of backups
+        if [ "$(find "$backup_dir" -type f -name "*.$BACKUP_FORMAT" | wc -l)" -gt "$min_keep" ]; then
+            log_info "Removing old backup: $backup"
+            rm -f "$backup"
+        fi
+    done
 }
 
-# Initialize
-ensure_backup_dirs 
+# Function to sync backups to cloud storage
+sync_to_cloud() {
+    local source_dir=$1
+    local dest_dir=$2
+    
+    if [ "$GDRIVE_ENABLED" != true ]; then
+        log_debug "Cloud sync disabled, skipping"
+        return 0
+    fi
+    
+    log_info "Syncing backups to cloud storage"
+    if ! rclone sync --progress "$source_dir" "gdrive:$dest_dir"; then
+        log_error "Failed to sync backups to cloud storage"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Initialize configuration
+init_config() {
+    ensure_directories
+    if ! validate_config; then
+        log_error "Configuration validation failed"
+        return 1
+    fi
+    if ! check_disk_space; then
+        log_error "Disk space check failed"
+        return 1
+    }
+    return 0
+}
+
+# Export utility functions
+export -f log_message
+export -f log_info
+export -f log_error
+export -f log_debug
+export -f verify_backup
+export -f cleanup_old_backups
+export -f sync_to_cloud
+
+# Initialize configuration when script is sourced
+init_config 

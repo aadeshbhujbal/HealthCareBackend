@@ -528,66 +528,11 @@ export class AuthController {
     try {
       // Verify Google token
       const ticket = await this.authService.verifyGoogleToken(token);
-      const payload = ticket.getPayload();
       
       // Handle Google login
-      return this.authService.handleGoogleLogin(payload, request);
+      return this.authService.handleGoogleLogin(ticket, request);
     } catch (error) {
       throw new UnauthorizedException('Invalid Google token');
-    }
-  }
-
-  @Public()
-  @Post('social/facebook')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Login with Facebook',
-    description: 'Authenticate using Facebook access token'
-  })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        token: { 
-          type: 'string', 
-          description: 'Facebook access token' 
-        }
-      },
-      required: ['token']
-    }
-  })
-  @ApiResponse({ 
-    status: 200, 
-    description: 'Login successful',
-    schema: {
-      type: 'object',
-      properties: {
-        access_token: { type: 'string' },
-        refresh_token: { type: 'string' },
-        user: { 
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            email: { type: 'string' },
-            role: { type: 'string' }
-          }
-        }
-      }
-    }
-  })
-  @ApiResponse({ status: 401, description: 'Invalid Facebook token' })
-  async facebookLogin(
-    @Body('token') token: string,
-    @Req() request: any
-  ): Promise<any> {
-    try {
-      // Verify Facebook token and get user data
-      const userData = await this.authService.verifyFacebookToken(token);
-      
-      // Handle Facebook login
-      return this.authService.handleFacebookLogin(userData, request);
-    } catch (error) {
-      throw new UnauthorizedException('Invalid Facebook token');
     }
   }
 

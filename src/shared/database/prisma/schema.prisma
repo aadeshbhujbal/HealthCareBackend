@@ -37,7 +37,6 @@ model User {
   updatedAt              DateTime                @updatedAt
   passwordChangedAt      DateTime?
   googleId               String?
-  facebookId             String?
   appleId                String?
   appName                String?
   medicalConditions      String?

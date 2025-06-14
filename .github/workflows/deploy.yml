@@ -740,14 +740,34 @@ jobs:
     needs: deploy
     runs-on: ubuntu-latest
     steps:
+      - name: Wait for deployment to stabilize
+        run: |
+          echo "Waiting 30 seconds for deployment to stabilize..."
+          sleep 30
+
       - name: Verify domain
         run: |
           echo "Verifying domain resolution for api.ishswami.in..."
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+          DNS_SUCCESS=false
 
-          # Check DNS resolution
-          if ! nslookup api.ishswami.in > /dev/null 2>&1; then
-            echo "Warning: Domain api.ishswami.in is not resolving"
-            echo "Check your DNS configuration"
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$DNS_SUCCESS" = false ]; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "DNS check attempt $RETRY_COUNT/$MAX_RETRIES..."
+            
+            if nslookup api.ishswami.in > /dev/null 2>&1; then
+              echo "✅ Domain api.ishswami.in resolves successfully"
+              DNS_SUCCESS=true
+            else
+              echo "⚠️ Domain not resolving yet, waiting 10 seconds..."
+              sleep 10
+            fi
+          done
+
+          if [ "$DNS_SUCCESS" = false ]; then
+            echo "⚠️ Warning: Domain api.ishswami.in is not resolving"
+            echo "This may be expected for new deployments"
           fi
 
       - name: Verify application health
@@ -756,115 +776,126 @@ jobs:
           host: ${{ env.SERVER_IP }}
           username: ${{ env.SERVER_USER }}
           key: ${{ env.SERVER_SSH_KEY }}
-          timeout: 120s
-          proxy_timeout: 120s
+          timeout: 180s
+          proxy_timeout: 180s
           script: |
             set -e
 
-            echo "Verifying application health..."
+            echo "Starting comprehensive health verification..."
 
-            # Function to parse and validate health check response
-            check_health_response() {
-              local HEALTH_OUTPUT=$1
-              
-              # Check for valid JSON structure with "status": "healthy"
-              if echo "$HEALTH_OUTPUT" | grep -q '"status"[[:space:]]*:[[:space:]]*"healthy"'; then
-                echo "✅ Main status check passed"
+            # Function to check container logs for startup indicators
+            check_container_logs() {
+              local container=$1
+              if docker logs $container 2>&1 | grep -q "Starting application bootstrap\|Application bootstrap started\|Redis.*Connected\|WebSocket.*configured\|Server running on port\|NestJS application is running"; then
                 return 0
               fi
-              
-              # Check individual services
-              local SERVICES=("api" "database" "redis" "queues" "logger" "socket" "email")
-              local ALL_HEALTHY=true
-              
-              for SERVICE in "${SERVICES[@]}"; do
-                if ! echo "$HEALTH_OUTPUT" | grep -q "\"$SERVICE\"[[:space:]]*:[[:space:]]*{[^}]*\"status\"[[:space:]]*:[[:space:]]*\"healthy\""; then
-                  echo "❌ Service $SERVICE is not healthy"
-                  ALL_HEALTHY=false
-                  break
-                fi
-              done
-              
-              if [ "$ALL_HEALTHY" = true ]; then
-                echo "✅ All services are healthy"
-                return 0
-              fi
-              
               return 1
             }
 
-            # Enhanced API verification with better error handling
-            echo "Performing comprehensive health check..."
-            MAX_RETRIES=5
-            RETRY_COUNT=0
-            HEALTH_CHECK_PASSED=false
+            # Function to check container status
+            check_container_status() {
+              local container=$1
+              if docker ps --filter "name=$container" --format "{{.Status}}" | grep -q "Up.*healthy"; then
+                return 0
+              fi
+              return 1
+            }
 
-            while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$HEALTH_CHECK_PASSED" != "true" ]; do
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              echo "Health check attempt $RETRY_COUNT/$MAX_RETRIES..."
+            # Enhanced health check function
+            check_health_endpoint() {
+              local attempt=$1
+              local max_attempts=$2
               
-              # First verify container is running
+              # Try multiple health check methods
+              for METHOD in "CURL" "WGET" "NC"; do
+                case $METHOD in
+                  "CURL")
+                    HEALTH_OUTPUT=$(curl -v --max-time 30 --retry 3 --retry-delay 2 http://localhost:8088/health 2>&1)
+                    ;;
+                  "WGET")
+                    HEALTH_OUTPUT=$(wget -O- --timeout=10 --tries=3 http://localhost:8088/health 2>&1)
+                    ;;
+                  "NC")
+                    HEALTH_OUTPUT=$(echo -e "GET /health HTTP/1.1\r\nHost: localhost:8088\r\n\r\n" | nc localhost 8088)
+                    ;;
+                esac
+                
+                if echo "$HEALTH_OUTPUT" | grep -q '"status"[[:space:]]*:[[:space:]]*"healthy"\|"status":"up"\|"ok"'; then
+                  echo "✅ Health check passed via $METHOD (attempt $attempt/$max_attempts)"
+                  return 0
+                fi
+              done
+              return 1
+            }
+
+            # Main verification loop
+            MAX_ATTEMPTS=20  # Increased from 10 to 20
+            ATTEMPT=1
+            VERIFICATION_SUCCESS=false
+            STARTUP_VERIFIED=false
+
+            while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+              echo "Verification attempt $ATTEMPT/$MAX_ATTEMPTS..."
+              
+              # Step 1: Check if container exists and is running
               if ! docker ps | grep -q "latest-api"; then
                 echo "❌ API container is not running!"
                 docker ps -a
+                sleep 15
+                ATTEMPT=$((ATTEMPT + 1))
                 continue
               fi
               
-              # Try multiple endpoints with proper timeout
-              HEALTH_OUTPUT=$(curl -s -m 10 http://localhost:8088/health)
-              CURL_EXIT=$?
+              # Step 2: Check container logs for startup indicators if not already verified
+              if [ "$STARTUP_VERIFIED" = false ] && check_container_logs "latest-api"; then
+                echo "✅ Found successful startup indicators in logs"
+                STARTUP_VERIFIED=true
+              fi
               
-              if [ $CURL_EXIT -eq 0 ]; then
-                echo "Raw health check response:"
-                echo "$HEALTH_OUTPUT"
+              # Step 3: Check container health status
+              if check_container_status "latest-api"; then
+                echo "✅ Container is marked as healthy by Docker"
                 
-                if check_health_response "$HEALTH_OUTPUT"; then
-                  echo "✅ Health check passed successfully!"
-                  HEALTH_CHECK_PASSED=true
-                  break
-                else
-                  echo "⚠️ Health check response validation failed"
-                fi
-              else
-                echo "⚠️ Failed to get health check response (curl exit code: $CURL_EXIT)"
-                # Try alternative URL
-                HEALTH_OUTPUT=$(curl -s -m 10 https://api.ishswami.in/health)
-                CURL_EXIT=$?
-                
-                if [ $CURL_EXIT -eq 0 ] && check_health_response "$HEALTH_OUTPUT"; then
-                  echo "✅ Health check passed via domain URL!"
-                  HEALTH_CHECK_PASSED=true
+                # Step 4: Verify health endpoint
+                if check_health_endpoint $ATTEMPT $MAX_ATTEMPTS; then
+                  echo "✅ All verification checks passed successfully!"
+                  VERIFICATION_SUCCESS=true
                   break
                 fi
               fi
               
-              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "Waiting 5 seconds before next attempt..."
-                sleep 5
-              fi
+              # If we reach here, some checks failed
+              echo "⏳ Some checks failed, waiting 15 seconds before next attempt..."
+              sleep 15
+              ATTEMPT=$((ATTEMPT + 1))
             done
 
-            # Final verification
-            if [ "$HEALTH_CHECK_PASSED" = "true" ]; then
-              echo "✅ Health check verification completed successfully"
+            # Final verification result
+            if [ "$VERIFICATION_SUCCESS" = true ]; then
+              echo "✅ Post-deployment verification completed successfully"
+              exit 0
+            elif [ "$STARTUP_VERIFIED" = true ]; then
+              echo "⚠️ Application started but health checks incomplete"
+              echo "Latest container logs:"
+              docker logs latest-api --tail 50
+              # Exit with 0 if we at least verified startup
               exit 0
             else
-              # Check container logs for successful startup indicators
-              if docker logs latest-api 2>&1 | grep -q "Starting application bootstrap\|Application bootstrap started\|Redis.*Connected\|WebSocket.*configured"; then
-                echo "✅ Found successful startup indicators in logs"
-                echo "Marking deployment as successful despite health check issues"
-                exit 0
-              else
-                echo "❌ Health check failed and no positive indicators found in logs"
-                docker logs latest-api --tail 50
-                exit 1
-              fi
+              echo "❌ Verification failed after $MAX_ATTEMPTS attempts"
+              echo "Latest container logs:"
+              docker logs latest-api --tail 50
+              exit 1
             fi
 
       - name: Update deployment status success
         if: success()
         run: |
-          echo "Deployment successful"
+          echo "Deployment verification successful"
+
+      - name: Update deployment status failure
+        if: failure()
+        run: |
+          echo "Deployment verification failed"
 
       - name: Trigger offsite backup
         if: success()

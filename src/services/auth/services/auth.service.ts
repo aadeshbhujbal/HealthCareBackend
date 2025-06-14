@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, BadRequestException, InternalServerErrorException, ConflictException, ForbiddenException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, BadRequestException, InternalServerErrorException, ConflictException, ForbiddenException, Logger, NotFoundException, ServiceUnavailableException, HttpException, HttpStatus } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../../../shared/database/prisma/prisma.service';
 import { RedisService } from '../../../shared/cache/redis/redis.service';
@@ -16,6 +16,7 @@ import { LogLevel, LogType } from '../../../shared/logging/types/logging.types';
 import { RedisCache } from '../../../shared/cache/decorators/redis-cache.decorator';
 import { ClinicService } from '../../clinic/clinic.service';
 import { ClinicUserService } from '../../clinic/services/clinic-user.service';
+import { OAuth2Client } from 'google-auth-library';
 
 @Injectable()
 export class AuthService {
@@ -32,6 +33,12 @@ export class AuthService {
   private readonly SMS_PROVIDER_URL = process.env.SMS_PROVIDER_URL || 'https://api.sms-provider.com/send';
   private readonly SMS_SENDER_ID = process.env.SMS_SENDER_ID || 'HealthApp';
   private readonly MAGIC_LINK_TTL = 900; // 15 minutes
+  private readonly TOKEN_BLACKLIST_TTL = 86400; // 24 hours
+  private readonly SESSION_CACHE_TTL = 86400; // 24 hours
+  private readonly USER_PROFILE_CACHE_TTL = 3600; // 1 hour
+  private readonly SESSION_ACTIVITY_THRESHOLD = 15 * 60 * 1000; // 15 minutes for session inactivity warning
+  private readonly SECURITY_EVENT_RETENTION = 30 * 24 * 60 * 60; // 30 days retention for security events
+  private readonly googleClient: OAuth2Client;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -45,6 +52,11 @@ export class AuthService {
     private readonly clinicUserService: ClinicUserService,
   ) {
     this.ensureSuperAdmin();
+    this.googleClient = new OAuth2Client(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
+    );
   }
 
   private async ensureSuperAdmin() {
@@ -320,24 +332,11 @@ export class AuthService {
     }
   }
 
-  // Get the appropriate redirect path based on user role
-  public getRedirectPathForRole(role: Role): string {
-    switch (role) {
-      case 'SUPER_ADMIN':
-        return '/super-admin/dashboard';
-      case 'DOCTOR':
-        return '/doctor/dashboard';
-      case 'PATIENT':
-        return '/patient/dashboard';
-      case 'CLINIC_ADMIN':
-        return '/clinic-admin/dashboard';
-      case 'RECEPTIONIST':
-        return '/receptionist/dashboard';
-      default:
-        return '/dashboard';
-    }
-  }
-
+  @RedisCache({
+    ttl: 3600, // 1 hour
+    prefix: 'auth:role-permissions',
+    tags: ['permissions', 'roles']
+  })
   private getRolePermissions(role: Role): string[] {
     const basePermissions = ['view_profile', 'edit_profile'];
     
@@ -385,6 +384,28 @@ export class AuthService {
         ];
       default:
         return basePermissions;
+    }
+  }
+
+  @RedisCache({
+    ttl: 3600, // 1 hour
+    prefix: 'auth:redirect-paths',
+    tags: ['roles', 'paths']
+  })
+  public getRedirectPathForRole(role: Role): string {
+    switch (role) {
+      case 'SUPER_ADMIN':
+        return '/super-admin/dashboard';
+      case 'DOCTOR':
+        return '/doctor/dashboard';
+      case 'PATIENT':
+        return '/patient/dashboard';
+      case 'CLINIC_ADMIN':
+        return '/clinic-admin/dashboard';
+      case 'RECEPTIONIST':
+        return '/receptionist/dashboard';
+      default:
+        return '/dashboard';
     }
   }
 
@@ -1013,6 +1034,12 @@ export class AuthService {
     return isValid;
   }
 
+  @RedisCache({
+    ttl: 300, // 5 minutes
+    prefix: 'auth:user-email',
+    tags: ['users'],
+    staleTime: 60 // Becomes stale after 1 minute
+  })
   async findUserByEmail(email: string): Promise<User | null> {
     return this.prisma.user.findUnique({
       where: { email }
@@ -1365,402 +1392,595 @@ export class AuthService {
   // Social login methods
   
   async handleGoogleLogin(googleUser: any, request: any): Promise<any> {
-    const { email, given_name, family_name, picture, sub: googleId } = googleUser;
+    const payload = googleUser.getPayload();
+    const { email, given_name, family_name, picture, sub: googleId } = payload;
     
     try {
-      // Check if user exists
-      let user = await this.findUserByEmail(email);
+      await this.loggingService.log(
+        LogType.AUTH,
+        LogLevel.INFO,
+        'Processing Google authentication',
+        'AuthService',
+        { email, googleId }
+      );
+
+      // Check if user exists by email or Google ID
+      let user = await this.prisma.user.findFirst({
+        where: {
+          OR: [
+            { email: email },
+            { googleId: googleId }
+          ]
+        },
+        include: {
+          patient: true,
+          doctor: true,
+          clinicAdmin: true,
+          receptionist: true
+        }
+      });
       
       if (!user) {
+        // New user registration
+        await this.loggingService.log(
+          LogType.AUTH,
+          LogLevel.INFO,
+          'New user registration via Google',
+          'AuthService',
+          { email }
+        );
+
         // Generate userid for new user
         const userid = await this.generateNextUID();
         
-        // Create new user if not exists
-        user = await this.prisma.user.create({
-          data: {
-            email,
-            firstName: given_name,
-            lastName: family_name,
-            name: `${given_name} ${family_name}`,
-            profilePicture: picture,
-            role: 'PATIENT', // Default role
-            isVerified: true, // Google emails are verified
-            password: await this.hashPassword(uuidv4()), // Random password
-            age: 0, // Default age, can be updated later
-            phone: '', // Default empty phone
-            gender: 'UNSPECIFIED', // Default gender
-            dateOfBirth: new Date(), // Default date, can be updated later
-            userid: userid
-          }
+        // Create new user with transaction to ensure all related records are created
+        const result = await this.prisma.$transaction(async (prisma) => {
+          // Create the user
+          const newUser = await prisma.user.create({
+            data: {
+              email,
+              firstName: given_name,
+              lastName: family_name,
+              name: `${given_name} ${family_name}`,
+              profilePicture: picture,
+              role: 'PATIENT',
+              isVerified: true,
+              password: await this.hashPassword(uuidv4()),
+              age: 0,
+              phone: '',
+              gender: 'UNSPECIFIED',
+              dateOfBirth: new Date(),
+              userid: userid,
+              googleId: googleId,
+              lastLogin: new Date(),
+              patient: {
+                create: {} // Create associated patient record
+              }
+            },
+            include: {
+              patient: true,
+              doctor: true,
+              clinicAdmin: true,
+              receptionist: true
+            }
+          });
+
+          return newUser;
         });
-        
-        // Log new user creation
-        this.logger.debug(`New user created: ${user.email}`);
-      } else if (!user.googleId) {
-        // Update existing user with Google ID if not already set
-        user = await this.prisma.user.update({
-          where: { id: user.id },
-          data: {
-            googleId,
-            isVerified: true,
-            profilePicture: user.profilePicture || picture
-          }
+
+        user = result;
+
+        // Emit user registration event
+        await this.eventService.emit('user.registered', {
+          userId: user.id,
+          email: user.email,
+          provider: 'GOOGLE',
+          role: 'PATIENT'
         });
+
+      } else {
+        // Existing user login
+        if (!user.googleId) {
+          // Link Google account to existing user
+          user = await this.prisma.user.update({
+            where: { id: user.id },
+            data: {
+              googleId,
+              isVerified: true,
+              profilePicture: user.profilePicture || picture,
+              lastLogin: new Date()
+            },
+            include: {
+              patient: true,
+              doctor: true,
+              clinicAdmin: true,
+              receptionist: true
+            }
+          });
+
+          await this.loggingService.log(
+            LogType.AUTH,
+            LogLevel.INFO,
+            'Linked Google account to existing user',
+            'AuthService',
+            { userId: user.id, email: user.email }
+          );
+        }
       }
-      
-      // Log successful Google login
-      this.logger.debug(`Google login successful for user ${user.email}`);
-      
-      // Generate tokens and return login response
-      return this.login(user, request);
-    } catch (error) {
-      this.logger.error(`Google login failed: ${error.message}`);
-      throw new InternalServerErrorException('Failed to process Google login');
-    }
-  }
-  
-  async handleFacebookLogin(facebookUser: any, request: any): Promise<any> {
-    const { email, first_name, last_name, picture, id: facebookId } = facebookUser;
-    
-    try {
-      // Check if user exists
-      let user = await this.findUserByEmail(email);
-      
-      if (!user) {
-        // Generate userid for new user
-        const userid = await this.generateNextUID();
-        
-        // Create new user if not exists
-        user = await this.prisma.user.create({
-          data: {
-            email,
-            firstName: first_name,
-            lastName: last_name,
-            name: `${first_name} ${last_name}`,
-            profilePicture: picture?.data?.url,
-            role: 'PATIENT', // Default role
-            isVerified: true, // Facebook emails are verified
-            password: await this.hashPassword(uuidv4()), // Random password
-            age: 0, // Default age, can be updated later
-            phone: '', // Default empty phone
-            gender: 'UNSPECIFIED', // Default gender
-            dateOfBirth: new Date(), // Default date, can be updated later
-            userid: userid
-          }
-        });
-        
-        // Log new user creation
-        this.logger.debug(`New user created: ${user.email}`);
-      } else if (!user.facebookId) {
-        // Update existing user with Facebook ID if not already set
-        user = await this.prisma.user.update({
-          where: { id: user.id },
-          data: {
-            facebookId,
-            isVerified: true,
-            profilePicture: user.profilePicture || picture?.data?.url
-          }
-        });
-      }
-      
-      // Log successful Facebook login
-      this.logger.debug(`Facebook login successful for user ${user.email}`);
-      
-      // Generate tokens and return login response
-      return this.login(user, request);
-    } catch (error) {
-      this.logger.error(`Facebook login failed: ${error.message}`);
-      throw new UnauthorizedException('Invalid Facebook login');
-    }
-  }
-  
-  async verifyFacebookToken(token: string): Promise<any> {
-    try {
-      // This is a placeholder for actual Facebook token verification
-      // In a real implementation, you would make a request to the Facebook Graph API
-      // Example: const response = await axios.get(`https://graph.facebook.com/me?fields=id,email,name,first_name,last_name,picture&access_token=${token}`);
-      
-      // For now, we'll simulate a successful verification with mock data
-      return {
-        id: 'facebook-user-id',
-        email: 'user@example.com',
-        name: 'John Doe',
-        first_name: 'John',
-        last_name: 'Doe',
-        picture: {
-          data: {
-            url: 'https://example.com/profile.jpg'
-          }
+
+      // Update last login time
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { lastLogin: new Date() }
+      });
+
+      // Generate login response with tokens
+      const loginResponse = await this.login(user, request);
+
+      // Add additional profile information
+      const enhancedResponse = {
+        ...loginResponse,
+        user: {
+          ...loginResponse.user,
+          isNewUser: !user.lastLogin,
+          googleId: user.googleId,
+          profileComplete: this.isProfileComplete(user)
         }
       };
+
+      await this.loggingService.log(
+        LogType.AUTH,
+        LogLevel.INFO,
+        'Google authentication successful',
+        'AuthService',
+        { 
+          userId: user.id, 
+          email: user.email,
+          isNewUser: !user.lastLogin
+        }
+      );
+
+      return enhancedResponse;
+
     } catch (error) {
-      this.logger.error(`Facebook token verification failed: ${error.message}`);
-      throw new UnauthorizedException('Invalid Facebook token');
-    }
-  }
-  
-  async verifyAppleToken(token: string): Promise<any> {
-    try {
-      // This is a placeholder for actual Apple token verification
-      // In a real implementation, you would verify the JWT token from Apple
-      // Example: const decoded = jwt.verify(token, applePublicKey, { algorithms: ['RS256'] });
-      
-      // For now, we'll simulate a successful verification with mock data
-      return {
-        sub: 'apple-user-id',
-        email: 'user@example.com',
-        name: 'John Doe'
-      };
-    } catch (error) {
-      this.logger.error(`Apple token verification failed: ${error.message}`);
-      throw new UnauthorizedException('Invalid Apple token');
+      await this.loggingService.log(
+        LogType.AUTH,
+        LogLevel.ERROR,
+        'Google authentication failed',
+        'AuthService',
+        { error: error.message, email }
+      );
+      throw new InternalServerErrorException('Failed to process Google authentication');
     }
   }
 
-  // Handle Apple login
-  async handleAppleLogin(appleUser: any, request: any): Promise<any> {
-    const { email, firstName, lastName, sub: appleId } = appleUser;
-    
+  @RedisCache({
+    ttl: 86400, // 24 hours
+    prefix: 'auth:profile-completion',
+    tags: ['users', 'profile']
+  })
+  private isProfileComplete(user: any): boolean {
+    return !!(
+      user.firstName &&
+      user.lastName &&
+      user.phone &&
+      user.dateOfBirth &&
+      user.gender !== 'UNSPECIFIED' &&
+      user.age > 0
+    );
+  }
+
+  private parseMedicalConditions(conditions: string | null): string[] {
+    if (!conditions) return [];
     try {
-      // Check if user exists
-      let user = await this.findUserByEmail(email);
-      
-      if (!user) {
-        // Generate userid for new user
-        const userid = await this.generateNextUID();
-        
-        // Create new user if not exists
-        user = await this.prisma.user.create({
-          data: {
-            email,
-            firstName,
-            lastName,
-            name: `${firstName} ${lastName}`,
-            role: 'PATIENT', // Default role
-            isVerified: true, // Apple emails are verified
-            password: await this.hashPassword(uuidv4()), // Random password
-            age: 0, // Default age, can be updated later
-            phone: '', // Default empty phone
-            gender: 'UNSPECIFIED', // Default gender
-            dateOfBirth: new Date(), // Default date, can be updated later
-            profilePicture: '', // Default empty profile picture
-            userid: userid
-          }
-        });
-        
-        // Log new user creation
-        this.logger.debug(`New user created: ${user.email}`);
-      } else if (!user.appleId) {
-        // Update existing user with Apple ID if not already set
-        user = await this.prisma.user.update({
-          where: { id: user.id },
-          data: {
-            appleId,
-            isVerified: true
-          }
-        });
-      }
-      
-      // Log successful Apple login
-      this.logger.debug(`Apple login successful for user ${user.email}`);
-      
-      // Generate tokens and return login response
-      return this.login(user, request);
-    } catch (error) {
-      this.logger.error(`Apple login failed: ${error.message}`);
-      throw new InternalServerErrorException('Failed to process Apple login');
+      return JSON.parse(conditions);
+    } catch {
+      return conditions.split(',').map(c => c.trim()).filter(Boolean);
     }
   }
-  
-  // Social login token verification methods
-  
-  async verifyGoogleToken(token: string): Promise<any> {
+
+  private stringifyMedicalConditions(conditions: string[]): string {
+    return JSON.stringify(conditions || []);
+  }
+
+  async verifyGoogleToken(token: string) {
     try {
-      // This is a placeholder for actual Google token verification
-      // In a real implementation, you would use the Google Auth Library
-      // Example: const ticket = await client.verifyIdToken({ idToken: token, audience: CLIENT_ID });
+      // Check rate limiting for social login attempts
+      const clientIp = this.getClientIp();
+      const attempts = await this.getSocialLoginAttempts(clientIp);
       
-      // For now, we'll simulate a successful verification with mock data
-      return {
-        getPayload: () => ({
-          email: 'user@example.com',
-          sub: 'google-user-id',
-          name: 'John Doe',
-          given_name: 'John',
-          family_name: 'Doe',
-          picture: 'https://example.com/profile.jpg'
-        })
-      };
+      if (attempts >= 10) { // Max 10 attempts per hour
+        throw new HttpException('Too many social login attempts', HttpStatus.TOO_MANY_REQUESTS);
+      }
+
+      await this.incrementSocialLoginAttempts(clientIp);
+
+      const ticket = await this.googleClient.verifyIdToken({
+        idToken: token,
+        audience: process.env.GOOGLE_CLIENT_ID
+      });
+
+      await this.loggingService.log(
+        LogType.AUTH,
+        LogLevel.INFO,
+        'Google token verified successfully',
+        'AuthService'
+      );
+
+      return ticket;
     } catch (error) {
-      this.logger.error(`Google token verification failed: ${error.message}`);
+      await this.loggingService.log(
+        LogType.AUTH,
+        LogLevel.ERROR,
+        'Google token verification failed',
+        'AuthService',
+        { error: error.message }
+      );
       throw new UnauthorizedException('Invalid Google token');
     }
   }
 
-  /**
-   * Get user profile by ID with caching
-   */
-  @RedisCache({
-    ttl: 900,                   // 15 minutes TTL
-    prefix: 'auth:profile',     // Cache key prefix
-    staleTime: 300,             // Data becomes stale after 5 minutes
-    tags: ['users', 'profile']  // Tags for grouped invalidation
-  })
-  async getUserProfile(userId: string) {
-    // ... existing implementation ...
-  }
-
-  /**
-   * Get all active sessions for a user
-   */
-  @RedisCache({
-    ttl: 300,                         // 5 minutes TTL
-    prefix: 'auth:sessions',          // Cache key prefix
-    staleTime: 60,                    // Data becomes stale after 1 minute
-    tags: ['users', 'user-sessions']  // Tags for grouped invalidation
-  })
-  async getUserSessions(userId: string) {
-    // ... existing implementation ...
-  }
-
-  /**
-   * Request password reset
-   */
-  async requestPasswordReset(email: string) {
-    // ... existing implementation ...
-  }
-
-  /**
-   * Verify email
-   */
-  async verifyEmail(token: string) {
-    const userId = await this.verifyResetToken(token);
-    if (!userId) {
-      throw new UnauthorizedException('Invalid or expired email verification token');
-    }
-    
-    // Get the user with the retrieved userId
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId }
-    });
-    
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-    
-    // Update user verification status
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: { isVerified: true }
-    });
-    
-    // Invalidate user's profile cache
-    await this.redisService.invalidateCacheByPattern(`auth:profile:${user.id}:*`);
-    await this.redisService.invalidateCacheByTag(`user:${user.id}`);
-    
-    return { success: true, message: 'Email verified successfully' };
-  }
-
-  /**
-   * Get user permissions with caching
-   */
-  @RedisCache({
-    ttl: 1800,                         // 30 minutes TTL
-    prefix: 'auth:permissions',        // Cache key prefix
-    staleTime: 600,                    // Data becomes stale after 10 minutes
-    tags: ['users', 'permissions']     // Tags for grouped invalidation
-  })
-  async getUserPermissions(userId: string) {
-    // ... existing implementation ...
-  }
-
-  /**
-   * Check if user has specific permission with shorter cache time
-   */
-  @RedisCache({
-    ttl: 300,                          // 5 minutes TTL
-    prefix: 'auth:has-permission',     // Cache key prefix
-    staleTime: 60,                     // Data becomes stale after 1 minute
-    tags: ['users', 'permissions']     // Tags for grouped invalidation
-  })
-  async hasPermission(userId: string, permission: string): Promise<boolean> {
-    // ... existing implementation ...
-    
-    // Return a boolean value to fix the missing return error
-    return false; // Replace with actual implementation
-  }
-
-  /**
-   * Update user profile
-   */
-  async updateUserProfile(
-    userId: string,
-    data: {
-      firstName?: string;
-      lastName?: string;
-      phoneNumber?: string;
-      address?: string;
-      profileImage?: string;
-    }
-  ) {
-    // ... existing code ...
-    
-    // Update the user profile
-    const updatedUser = await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        // Map the profile data to the user model fields
-        firstName: data.firstName,
-        lastName: data.lastName,
-        phone: data.phoneNumber,
-        // Add other fields as needed
-      }
-    });
-    
-    await this.redisService.invalidateCacheByTag(`user:${userId}`);
-    
-    return updatedUser;
-  }
-
-  /**
-   * Change password
-   */
-  async changePassword(userId: string, currentPassword: string, newPassword: string) {
-    // ... existing implementation ...
-    
-    // Invalidate user's profile and sessions caches
-    await this.redisService.invalidateCacheByPattern(`auth:profile:${userId}:*`);
-    await this.redisService.invalidateCacheByPattern(`auth:sessions:${userId}:*`);
-    await this.redisService.invalidateCacheByTag(`user:${userId}`);
-    await this.redisService.invalidateCacheByTag('user-sessions');
-    
-    return { success: true, message: 'Password changed successfully' };
-  }
-
-  /**
-   * Get user roles with caching
-   */
-  @RedisCache({
-    ttl: 1800,                    // 30 minutes TTL
-    prefix: 'auth:roles',         // Cache key prefix
-    staleTime: 600,               // Data becomes stale after 10 minutes
-    tags: ['users', 'roles']      // Tags for grouped invalidation
-  })
-  async getUserRoles(userId: string) {
-    // ... existing implementation ...
-  }
-
-  private parseMedicalConditions(medicalConditions: string | null): string[] {
-    if (!medicalConditions) return [];
+  async verifyAppleToken(token: string) {
     try {
-      return JSON.parse(medicalConditions);
-    } catch {
-      return [];
+      // Check rate limiting for social login attempts
+      const clientIp = this.getClientIp();
+      const attempts = await this.getSocialLoginAttempts(clientIp);
+      
+      if (attempts >= 10) { // Max 10 attempts per hour
+        throw new HttpException('Too many social login attempts', HttpStatus.TOO_MANY_REQUESTS);
+      }
+
+      await this.incrementSocialLoginAttempts(clientIp);
+
+      const decodedToken = await this.jwtService.verifyAsync(token, {
+        secret: process.env.APPLE_PUBLIC_KEY
+      });
+
+      await this.loggingService.log(
+        LogType.AUTH,
+        LogLevel.INFO,
+        'Apple token verified successfully',
+        'AuthService'
+      );
+
+      return decodedToken;
+    } catch (error) {
+      await this.loggingService.log(
+        LogType.AUTH,
+        LogLevel.ERROR,
+        'Apple token verification failed',
+        'AuthService',
+        { error: error.message }
+      );
+      throw new UnauthorizedException('Invalid Apple token');
     }
   }
 
-  private stringifyMedicalConditions(medicalConditions?: string[]): string | null {
-    if (!medicalConditions?.length) return null;
-    return JSON.stringify(medicalConditions);
+  private getClientIp(): string {
+    // This is a placeholder - implement according to your needs
+    // You should get this from the request object in your actual implementation
+    return 'client-ip';
+  }
+
+  @RedisCache({
+    ttl: 300, // 5 minutes
+    prefix: 'auth:token-verify',
+    tags: ['auth', 'tokens'],
+    staleTime: 60 // Becomes stale after 1 minute
+  })
+  private async verifyTokenAndGetPayload(token: string): Promise<any> {
+    return this.jwtService.verify(token);
+  }
+
+  private async isTokenBlacklisted(token: string): Promise<boolean> {
+    const blacklistKey = `blacklist:token:${token.substring(0, 64)}`;
+    return !!(await this.redisService.get(blacklistKey));
+  }
+
+  async verifyToken(token: string): Promise<any> {
+    try {
+      // First check blacklist - no caching here for security
+      const isBlacklisted = await this.isTokenBlacklisted(token);
+      if (isBlacklisted) {
+        throw new UnauthorizedException('Token has been invalidated');
+      }
+
+      // Verify token with caching
+      const payload = await this.verifyTokenAndGetPayload(token);
+      return payload;
+    } catch (error) {
+      if (error.name === 'TokenExpiredError') {
+        throw new UnauthorizedException('Token has expired');
+      }
+      if (error.name === 'JsonWebTokenError') {
+        throw new UnauthorizedException('Invalid token format');
+      }
+      throw new UnauthorizedException('Token validation failed');
+    }
+  }
+
+  @RedisCache({
+    ttl: 3600, // 1 hour
+    prefix: 'auth:session',
+    tags: ['sessions'],
+    staleTime: 300 // Becomes stale after 5 minutes
+  })
+  private async getSessionData(sessionId: string): Promise<any> {
+    const sessionKey = `session:${sessionId}`;
+    return this.redisService.get(sessionKey);
+  }
+
+  async validateSession(userId: string, request: any, deviceFingerprint: string): Promise<any> {
+    const sessionId = request.headers['x-session-id'];
+    if (!sessionId) {
+      throw new UnauthorizedException('Session ID not provided');
+    }
+
+    const sessionData = await this.getSessionData(sessionId);
+    if (!sessionData) {
+      throw new UnauthorizedException('Session expired or invalidated');
+    }
+
+    const parsedSession = JSON.parse(sessionData);
+
+    // Verify session is active
+    if (!parsedSession.isActive) {
+      throw new UnauthorizedException('Session is no longer active');
+    }
+
+    // Check session inactivity
+    const lastActivity = new Date(parsedSession.lastActivityAt).getTime();
+    const inactivityDuration = Date.now() - lastActivity;
+    if (inactivityDuration > this.SESSION_ACTIVITY_THRESHOLD) {
+      await this.trackSecurityEvent(userId, 'SESSION_INACTIVITY_WARNING', {
+        sessionId,
+        inactivityDuration: Math.floor(inactivityDuration / 1000)
+      });
+    }
+
+    // For logout operations, be more lenient with device validation
+    const isLogoutRequest = request.path === '/auth/logout';
+    if (isLogoutRequest) {
+      // During logout, only validate the user-agent as it's the most stable component
+      const currentUserAgent = request.headers['user-agent'];
+      const storedUserAgent = parsedSession.userAgent;
+      
+      if (currentUserAgent && storedUserAgent && currentUserAgent !== storedUserAgent) {
+        await this.trackSecurityEvent(userId, 'DEVICE_MISMATCH_LOGOUT', {
+          sessionId,
+          expectedUserAgent: storedUserAgent,
+          receivedUserAgent: currentUserAgent
+        });
+        // Log the mismatch but don't block logout
+        this.loggingService.log(
+          LogType.SECURITY,
+          LogLevel.WARN,
+          'Device mismatch during logout',
+          'AuthService',
+          { userId, sessionId, expectedUserAgent: storedUserAgent, receivedUserAgent: currentUserAgent }
+        );
+      }
+      return parsedSession;
+    }
+
+    // For non-logout operations, perform strict device validation
+    if (parsedSession.deviceFingerprint !== deviceFingerprint) {
+      await this.trackSecurityEvent(userId, 'DEVICE_MISMATCH', {
+        sessionId,
+        expectedFingerprint: parsedSession.deviceFingerprint,
+        receivedFingerprint: deviceFingerprint
+      });
+      throw new UnauthorizedException('Invalid device detected');
+    }
+
+    return parsedSession;
+  }
+
+  @RedisCache({
+    ttl: 3600, // 1 hour
+    prefix: 'auth:social-login-attempts',
+    tags: ['auth', 'social-login']
+  })
+  private async getSocialLoginAttempts(identifier: string): Promise<number> {
+    const attemptsKey = `social_login_attempts:${identifier}`;
+    const attempts = await this.redisService.get(attemptsKey);
+    return attempts ? parseInt(attempts) : 0;
+  }
+
+  private async incrementSocialLoginAttempts(identifier: string): Promise<void> {
+    const attemptsKey = `social_login_attempts:${identifier}`;
+    const attempts = await this.getSocialLoginAttempts(identifier);
+    await this.redisService.set(
+      attemptsKey,
+      (attempts + 1).toString(),
+      3600 // 1 hour TTL
+    );
+  }
+
+  private async trackSecurityEvent(identifier: string, eventType: string, details: any): Promise<void> {
+    const event = {
+      timestamp: new Date(),
+      eventType,
+      identifier,
+      details
+    };
+
+    await this.redisService.rPush(
+      `security:events:${identifier}`,
+      JSON.stringify(event)
+    );
+
+    // Trim old events
+    await this.redisService.lTrim(
+      `security:events:${identifier}`,
+      -1000,
+      -1
+    );
+
+    // Set expiry for events list
+    await this.redisService.expire(
+      `security:events:${identifier}`,
+      this.SECURITY_EVENT_RETENTION
+    );
+  }
+
+  async handleAppleLogin(appleUser: any, request: any): Promise<any> {
+    const { email, sub: appleId } = appleUser;
+    
+    try {
+      await this.loggingService.log(
+        LogType.AUTH,
+        LogLevel.INFO,
+        'Processing Apple authentication',
+        'AuthService',
+        { email, appleId }
+      );
+
+      // Check if user exists by email or Apple ID
+      let user = await this.prisma.user.findFirst({
+        where: {
+          OR: [
+            { email: email },
+            { appleId: appleId }
+          ]
+        },
+        include: {
+          patient: true,
+          doctor: true,
+          clinicAdmin: true,
+          receptionist: true
+        }
+      });
+      
+      if (!user) {
+        // New user registration
+        await this.loggingService.log(
+          LogType.AUTH,
+          LogLevel.INFO,
+          'New user registration via Apple',
+          'AuthService',
+          { email }
+        );
+
+        // Generate userid for new user
+        const userid = await this.generateNextUID();
+        
+        // Create new user with transaction to ensure all related records are created
+        const result = await this.prisma.$transaction(async (prisma) => {
+          // Create the user
+          const newUser = await prisma.user.create({
+            data: {
+              email,
+              firstName: appleUser.given_name || '',
+              lastName: appleUser.family_name || '',
+              name: appleUser.name || email.split('@')[0],
+              role: 'PATIENT',
+              isVerified: true,
+              password: await this.hashPassword(uuidv4()),
+              age: 0,
+              phone: '',
+              gender: 'UNSPECIFIED',
+              dateOfBirth: new Date(),
+              userid: userid,
+              appleId: appleId,
+              lastLogin: new Date(),
+              patient: {
+                create: {} // Create associated patient record
+              }
+            },
+            include: {
+              patient: true,
+              doctor: true,
+              clinicAdmin: true,
+              receptionist: true
+            }
+          });
+
+          return newUser;
+        });
+
+        user = result;
+
+        // Emit user registration event
+        await this.eventService.emit('user.registered', {
+          userId: user.id,
+          email: user.email,
+          provider: 'APPLE',
+          role: 'PATIENT'
+        });
+
+      } else {
+        // Existing user login
+        if (!user.appleId) {
+          // Link Apple account to existing user
+          user = await this.prisma.user.update({
+            where: { id: user.id },
+            data: {
+              appleId,
+              isVerified: true,
+              lastLogin: new Date()
+            },
+            include: {
+              patient: true,
+              doctor: true,
+              clinicAdmin: true,
+              receptionist: true
+            }
+          });
+
+          await this.loggingService.log(
+            LogType.AUTH,
+            LogLevel.INFO,
+            'Linked Apple account to existing user',
+            'AuthService',
+            { userId: user.id, email: user.email }
+          );
+        }
+      }
+
+      // Update last login time
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { lastLogin: new Date() }
+      });
+
+      // Generate login response with tokens
+      const loginResponse = await this.login(user, request);
+
+      // Add additional profile information
+      const enhancedResponse = {
+        ...loginResponse,
+        user: {
+          ...loginResponse.user,
+          isNewUser: !user.lastLogin,
+          appleId: user.appleId,
+          profileComplete: this.isProfileComplete(user)
+        }
+      };
+
+      await this.loggingService.log(
+        LogType.AUTH,
+        LogLevel.INFO,
+        'Apple authentication successful',
+        'AuthService',
+        { 
+          userId: user.id, 
+          email: user.email,
+          isNewUser: !user.lastLogin
+        }
+      );
+
+      return enhancedResponse;
+
+    } catch (error) {
+      await this.loggingService.log(
+        LogType.AUTH,
+        LogLevel.ERROR,
+        'Apple authentication failed',
+        'AuthService',
+        { error: error.message, email }
+      );
+      throw new InternalServerErrorException('Failed to process Apple authentication');
+    }
   }
 } 
