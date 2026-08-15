@@ -474,12 +474,13 @@ export class SecurityConfigService {
       parseOptions: {},
     };
 
-    // Call method directly on adapter to avoid ESLint unbound-method warning
+    // Use Reflect.apply to call method with proper 'this' binding - avoids ESLint unbound-method warning
     const methodName: keyof IFastifyFrameworkAdapter = 'registerCookie';
-    if (typeof adapter[methodName] !== 'function') {
+    const method = adapter[methodName];
+    if (typeof method !== 'function') {
       throw new Error('registerCookie is not a function');
     }
-    await adapter[methodName](app, cookieOptions);
+    await Reflect.apply(method, adapter, [app, cookieOptions]);
   }
 
   /**
@@ -627,7 +628,8 @@ export class SecurityConfigService {
 
     // Use Reflect.apply to call method with proper 'this' binding - avoids ESLint unbound-method warning
     const methodName: keyof IFastifyFrameworkAdapter = 'registerSession';
-    if (typeof adapter[methodName] !== 'function') {
+    const method = adapter[methodName];
+    if (typeof method !== 'function') {
       throw new Error('registerSession is not a function');
     }
 
@@ -662,7 +664,7 @@ export class SecurityConfigService {
 
     try {
       this.logger.log('About to call registerSession method...');
-      await adapter[methodName](app, sessionOptions);
+      await Reflect.apply(method, adapter, [app, sessionOptions]);
       this.logger.log('Fastify session plugin registered successfully');
     } catch (registerError) {
       const errorMessage =
@@ -679,7 +681,7 @@ export class SecurityConfigService {
         const optionsWithoutStore = { ...sessionOptions };
         delete optionsWithoutStore['store'];
         try {
-          await adapter[methodName](app, optionsWithoutStore);
+          await Reflect.apply(method, adapter, [app, optionsWithoutStore]);
           this.logger.log('Fastify session plugin registered successfully without store');
         } catch (retryError) {
           this.logger.error(
