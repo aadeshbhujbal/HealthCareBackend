@@ -24,7 +24,12 @@ import {
 } from '@core/types';
 import { JobType } from '@core/types/queue.types';
 // Future use: BULK_INVOICE_QUEUE, PAYMENT_RECONCILIATION_QUEUE
-import { SubscriptionStatus, InvoiceStatus, PaymentStatus } from '@core/types/enums.types';
+import {
+  SubscriptionStatus,
+  InvoiceStatus,
+  PaymentStatus,
+  AppointmentQueueCategory,
+} from '@core/types/enums.types';
 import {
   CreateBillingPlanDto,
   UpdateBillingPlanDto,
@@ -56,8 +61,8 @@ import type {
   RefundResult,
 } from '@core/types/payment.types';
 import { PaymentProvider } from '@core/types/payment.types';
-import { formatDateInIST, nowIso } from '../../libs/utils/date-time.util';
-import { formatCurrencyFromMinorUnits } from '../../libs/utils/currency.util';
+import { formatDateInIST, nowIso } from '@utils/date-time.util';
+import { formatCurrencyFromMinorUnits } from '@utils/currency.util';
 
 // Import centralized types
 import type {
@@ -1506,10 +1511,7 @@ export class BillingService implements OnModuleInit {
   private async createInvoiceRecordAtomically(data: CreateInvoiceDto, totalAmount: number) {
     return this.databaseService.executeHealthcareWrite(
       async client => {
-        const typedClient = client as unknown as PrismaTransactionClientWithDelegates & {
-          $executeRawUnsafe: (query: string, ...values: unknown[]) => Promise<number>;
-          $queryRawUnsafe: <T = unknown>(query: string, ...values: unknown[]) => Promise<T>;
-        };
+        const typedClient = client as unknown as PrismaTransactionClientWithDelegates;
 
         // Allocate invoice number within transaction - uses advisory lock internally
         // to serialize concurrent requests and prevent duplicate invoice numbers
@@ -1550,26 +1552,23 @@ export class BillingService implements OnModuleInit {
   }
 
   private async allocateInvoiceNumberInTransaction(
-    typedClient: PrismaTransactionClientWithDelegates & {
-      $executeRawUnsafe: (query: string, ...values: unknown[]) => Promise<number>;
-      $queryRawUnsafe: <T = unknown>(query: string, ...values: unknown[]) => Promise<T>;
-    }
+    typedClient: PrismaTransactionClientWithDelegates
   ): Promise<string> {
-    // Serialize invoice number allocation within the transaction using advisory lock
-    // This prevents race conditions when multiple invoices are created concurrently
-    await typedClient.$executeRawUnsafe('SELECT pg_advisory_xact_lock($1)', 2026032901);
+    // Serialize invoice number allocation within the transaction using advisory lock.
+    // This prevents race conditions when multiple invoices are created concurrently.
+    // Using $executeRaw/$queryRaw template-tag form (not $unsafe variants) — the
+    // SQL here contains no user-supplied values, but the safer form is the project standard.
+    await typedClient.$executeRaw`SELECT pg_advisory_xact_lock(${2026032901})`;
 
     // Now safe to query - no other transaction can be allocating at the same time
-    const rows = await typedClient.$queryRawUnsafe<Array<{ maxSequence: number | string | null }>>(
-      `
-        SELECT COALESCE(
-          MAX(CAST(SUBSTRING("invoiceNumber" FROM '([0-9]+)$') AS INTEGER)),
-          0
-        ) AS "maxSequence"
-        FROM "Invoice"
-        WHERE "invoiceNumber" ~ '^INV-[0-9]{4}-[0-9]+$'
-      `
-    );
+    const rows = await typedClient.$queryRaw<Array<{ maxSequence: number | string | null }>>`
+      SELECT COALESCE(
+        MAX(CAST(SUBSTRING("invoiceNumber" FROM '([0-9]+)$') AS INTEGER)),
+        0
+      ) AS "maxSequence"
+      FROM "Invoice"
+      WHERE "invoiceNumber" ~ '^INV-[0-9]{4}-[0-9]+$'
+    `;
 
     const maxSequenceRaw = rows?.[0]?.maxSequence ?? 0;
     const maxSequence = Number(maxSequenceRaw);
@@ -2016,7 +2015,7 @@ export class BillingService implements OnModuleInit {
         queueCategory:
           typeof paymentMetadata['queueCategory'] === 'string'
             ? paymentMetadata['queueCategory']
-            : 'MEDICINE_DESK',
+            : AppointmentQueueCategory.MEDICINE_DESK,
         paymentStatus: 'PAID',
         pendingAmount: 0,
         queueStatus: 'PENDING',

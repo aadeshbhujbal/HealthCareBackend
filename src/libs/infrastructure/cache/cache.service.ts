@@ -493,16 +493,18 @@ export class CacheService implements OnModuleInit, OnModuleDestroy {
     return l2Value;
   }
 
-  async set<T>(key: string, value: T, ttl?: number): Promise<void> {
+  async set<T>(key: string, value: T, ttl?: number): Promise<void>;
+  async set<T>(key: string, value: T, ttl?: { ttl?: number } | number): Promise<void> {
     this.ensureConfigInitialized();
-    const options: CacheOperationOptions = ttl !== undefined ? { ttl } : {};
+    const resolvedTtl = typeof ttl === 'number' ? ttl : ttl?.ttl;
+    const options: CacheOperationOptions = resolvedTtl !== undefined ? { ttl: resolvedTtl } : {};
 
     // Set in L2 (distributed cache)
     await this.cacheRepository.set(key, value, options);
 
     // Set in L1 (in-memory cache) with shorter TTL
     if (this.enableL1 && this.l1CacheService) {
-      const l1TTL = ttl ? Math.min(ttl, this.l1TTL) : this.l1TTL;
+      const l1TTL = resolvedTtl ? Math.min(resolvedTtl, this.l1TTL) : this.l1TTL;
       this.l1CacheService.set(key, value, l1TTL);
     }
   }
@@ -569,6 +571,10 @@ export class CacheService implements OnModuleInit, OnModuleDestroy {
   }
 
   async invalidateByPattern(pattern: string): Promise<number> {
+    return this.invalidateCacheByPattern(pattern);
+  }
+
+  async invalidatePattern(pattern: string): Promise<number> {
     return this.invalidateCacheByPattern(pattern);
   }
 

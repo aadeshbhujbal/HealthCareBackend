@@ -82,7 +82,6 @@ import {
   UpdateAssistantDoctorCoverageDto,
   AssistantDoctorCoverageResponseDto,
   ProcessCheckInDto,
-  StartConsultationDto,
   ProposeVideoSlotsDto,
   ConfirmVideoSlotDto,
   ConfirmVideoFinalSlotDto,
@@ -2391,7 +2390,7 @@ export class AppointmentsController {
    */
   @Post(':id/check-in')
   @HttpCode(HttpStatus.OK)
-  @Roles(Role.PATIENT, Role.RECEPTIONIST, Role.DOCTOR, Role.ASSISTANT_DOCTOR, Role.NURSE)
+  @Roles(Role.RECEPTIONIST, Role.DOCTOR, Role.ASSISTANT_DOCTOR, Role.NURSE)
   @ClinicRoute()
   @RequireResourcePermission('appointments', 'update', {
     requireOwnership: true,
@@ -2739,98 +2738,6 @@ export class AppointmentsController {
       }
 
       if (error instanceof HttpException) {
-        throw error;
-      }
-
-      throw this.errors.internalServerError(context);
-    }
-  }
-
-  /**
-   * Start consultation
-   * @deprecated Use PATCH /:id/status instead
-   * POST /appointments/:id/start
-   */
-  /**
-   * @deprecated Use PATCH /appointments/:id/status with status=IN_PROGRESS instead
-   */
-  @Post(':id/start-consultation')
-  @HttpCode(HttpStatus.OK)
-  @Roles(Role.DOCTOR, Role.ASSISTANT_DOCTOR, Role.NURSE, Role.RECEPTIONIST)
-  @ClinicRoute()
-  @RequireResourcePermission('appointments', 'update', {
-    requireOwnership: false,
-  })
-  @UseGuards(JwtAuthGuard, RolesGuard, ClinicGuard, RbacGuard)
-  @RateLimitAPI({ points: 20, duration: 60 })
-  @ApiOperation({
-    summary: 'Start consultation',
-    description: 'Starts the consultation for an appointment',
-  })
-  @ApiParam({
-    name: 'id',
-    description: 'ID of the appointment',
-    type: 'string',
-  })
-  @ApiBody({
-    type: StartConsultationDto,
-  })
-  @ApiResponse({
-    status: HttpStatus.OK,
-    description: 'Consultation started successfully',
-  })
-  @InvalidateAppointmentCache()
-  async startConsultation(
-    @Param('id', ParseUUIDPipe) appointmentId: string,
-    @Body(ValidationPipe) startDto: StartConsultationDto,
-    @Request() req: ClinicAuthenticatedRequest
-  ): Promise<ServiceResponse<{ message: string }>> {
-    const startTime = Date.now();
-    const context = 'AppointmentsController.startConsultation';
-    const userId = req.user?.id || '';
-    const clinicId = req.clinicContext?.clinicId || '';
-
-    try {
-      await this.appointmentService.startConsultation(
-        appointmentId,
-        startDto,
-        userId,
-        clinicId,
-        req.user?.role || 'USER'
-      );
-
-      await this.loggingService.log(
-        LogType.BUSINESS,
-        LogLevel.INFO,
-        'Consultation started via API',
-        context,
-        {
-          appointmentId,
-          userId,
-          clinicId,
-          responseTime: Date.now() - startTime,
-        }
-      );
-
-      return {
-        success: true,
-        data: { message: 'Consultation started successfully' },
-      };
-    } catch (error) {
-      await this.loggingService.log(
-        LogType.ERROR,
-        LogLevel.ERROR,
-        `Failed to start consultation: ${error instanceof Error ? error.message : String(error)}`,
-        context,
-        {
-          appointmentId,
-          clinicId: req.clinicContext?.clinicId,
-          error: error instanceof Error ? error.stack : undefined,
-          responseTime: Date.now() - startTime,
-        }
-      );
-
-      if (error instanceof HealthcareError) {
         throw error;
       }
 

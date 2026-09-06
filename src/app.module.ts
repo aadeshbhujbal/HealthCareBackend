@@ -20,7 +20,11 @@ import { VideoModule } from './services/video/video.module';
 import { ResilienceModule } from '@core/resilience/resilience.module';
 import { ErrorsModule } from '@core/errors';
 import { SecurityModule } from '@security/security.module';
+import { AyurvedaModule } from './services/ayurveda/ayurveda.module';
+import { DietModule } from './services/diet/diet.module';
 import { PharmacyModule } from './services/pharmacy/pharmacy.module';
+import { PharmacyInventoryModule } from './services/pharmacy-inventory/pharmacy-inventory.module';
+import { IpdModule } from './services/ipd/ipd.module';
 import { EventsModule } from '@infrastructure/events/events.module';
 import { CacheModule } from '@infrastructure/cache/cache.module';
 import { SessionModule } from '@core/session/session.module';
@@ -82,11 +86,18 @@ import { ScheduleModule } from '@nestjs/schedule';
     ClinicModule,
     BillingModule,
     EHRModule,
+    // Ayurvedic clinical data module (Prakriti, Nadi Pariksha, Dosha tracking, Samprapti)
+    AyurvedaModule,
+    DietModule,
     PharmacyModule,
+    // Pharmacy inventory management module (batch/lot tracking, FEFO, expiry alerts, auto-reorder, inter-clinic transfer)
+    PharmacyInventoryModule,
+    // Automation module (merged into CommunicationModule)
+    CommunicationModule,
+    // IPD module (admission, beds, wards, discharge, nurse station, daily billing)
+    IpdModule,
     // Video consultation module (provider-agnostic video integration)
     VideoModule,
-    // Unified Communication Module (includes all channels: socket, push, email, WhatsApp, SMS, listeners)
-    CommunicationModule,
     // Support modules
     HealthModule,
     PatientsModule,
