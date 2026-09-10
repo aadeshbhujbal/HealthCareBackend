@@ -1,4 +1,4 @@
-import { nowIso } from '@utils/date-time.util';
+import { nowIso, IST_TIMEZONE } from '@utils/date-time.util';
 import {
   Controller,
   Get,
@@ -2029,13 +2029,13 @@ export class AppointmentsController {
       const parsed = new Date(payload.newAppointmentDate);
       if (!Number.isNaN(parsed.getTime())) {
         newDate = new Intl.DateTimeFormat('en-CA', {
-          timeZone: 'Asia/Kolkata',
+          timeZone: IST_TIMEZONE,
           year: 'numeric',
           month: '2-digit',
           day: '2-digit',
         }).format(parsed);
         newTime = new Intl.DateTimeFormat('en-GB', {
-          timeZone: 'Asia/Kolkata',
+          timeZone: IST_TIMEZONE,
           hour: '2-digit',
           minute: '2-digit',
           hour12: false,
@@ -3062,8 +3062,8 @@ export class AppointmentsController {
           const dateB = new Date(b.date);
 
           // Today's appointments first
-          const aIsToday = dateA.toDateString() === today.toDateString();
-          const bIsToday = dateB.toDateString() === today.toDateString();
+          const aIsToday = isSameIstDay(dateA, today);
+          const bIsToday = isSameIstDay(dateB, today);
 
           if (aIsToday && !bIsToday) return -1;
           if (!aIsToday && bIsToday) return 1;

@@ -48,7 +48,7 @@ const CATEGORY_LABELS: Record<AppointmentServiceCategory, string> = {
   [AppointmentServiceCategory.THERAPY]: 'Therapy',
 };
 
-export const DEFAULT_APPOINTMENT_DURATION_MINUTES = 3;
+export const DEFAULT_APPOINTMENT_DURATION_MINUTES = 30;
 
 export const APPOINTMENT_SERVICE_CATALOG: readonly TreatmentCatalogEntry[] = [
   {

@@ -2770,6 +2770,25 @@ export class BillingService implements OnModuleInit {
       throw new NotFoundException('Appointment not found');
     }
 
+    if (
+      [
+        AppointmentStatus.CANCELLED,
+        AppointmentStatus.EXPIRED,
+        AppointmentStatus.COMPLETED,
+      ].includes(appointment.status as AppointmentStatus)
+    ) {
+      throw new BadRequestException(
+        'This appointment is no longer payable. Please book a new appointment.'
+      );
+    }
+
+    const paymentExpiresAt = (appointment as { paymentExpiresAt?: Date | null }).paymentExpiresAt;
+    if (paymentExpiresAt && paymentExpiresAt.getTime() <= Date.now()) {
+      throw new BadRequestException(
+        'The payment window for this appointment has expired. Please book a new appointment.'
+      );
+    }
+
     const billingUserId = await this.resolveAppointmentBillingUserId(appointment);
 
     this.assertBillingEntityAccess(
@@ -3326,45 +3345,66 @@ export class BillingService implements OnModuleInit {
 
       if (incomingStatusLower === 'completed' && payment.appointmentId && completedAppointment) {
         if (String(completedAppointment.status) !== String(AppointmentStatus.CONFIRMED)) {
-          completedAppointment = await this.databaseService.executeHealthcareWrite(
-            async client => {
-              const appointmentClient = client as unknown as {
-                appointment: {
-                  update: (args: {
-                    where: { id: string };
-                    data: { status: string };
-                  }) => Promise<unknown>;
-                };
-              };
-              return (await appointmentClient.appointment.update({
-                where: { id: payment.appointmentId as string },
-                data: {
-                  status: AppointmentStatus.CONFIRMED,
-                },
-              })) as AppointmentWithRelations;
-            },
-            {
-              userId: 'system',
-              clinicId: completedAppointment.clinicId,
-              resourceType: 'APPOINTMENT',
-              operation: 'UPDATE',
-              resourceId: payment.appointmentId,
-              userRole: 'system',
-              details: {
-                reason: 'Payment callback completed',
-                paymentId: payment.id,
-                orderId,
-              },
-            }
-          );
-        }
+          const paymentExpiresAt = (completedAppointment as { paymentExpiresAt?: Date | null })
+            .paymentExpiresAt;
+          const canConfirm = !paymentExpiresAt || paymentExpiresAt.getTime() > Date.now();
 
-        completedAppointment =
-          (await this.databaseService.findAppointmentByIdSafe(payment.appointmentId)) ??
-          completedAppointment;
+          if (canConfirm) {
+            const confirmationResult = await this.databaseService.executeHealthcareWrite(
+              async client => {
+                const appointmentClient = client as unknown as {
+                  appointment: {
+                    updateMany: (args: {
+                      where: {
+                        id: string;
+                        status: { notIn: string[] };
+                        paymentExpiresAt?: { gt: Date };
+                      };
+                      data: { status: string };
+                    }) => Promise<{ count: number }>;
+                  };
+                };
+                return appointmentClient.appointment.updateMany({
+                  where: {
+                    id: payment.appointmentId as string,
+                    status: {
+                      notIn: [
+                        AppointmentStatus.CANCELLED,
+                        AppointmentStatus.EXPIRED,
+                        AppointmentStatus.COMPLETED,
+                      ],
+                    },
+                    ...(paymentExpiresAt ? { paymentExpiresAt: { gt: new Date() } } : {}),
+                  },
+                  data: { status: AppointmentStatus.CONFIRMED },
+                });
+              },
+              {
+                userId: 'system',
+                clinicId: completedAppointment.clinicId,
+                resourceType: 'APPOINTMENT',
+                operation: 'UPDATE',
+                resourceId: payment.appointmentId,
+                userRole: 'system',
+                details: {
+                  reason: 'Payment callback completed',
+                  paymentId: payment.id,
+                  orderId,
+                },
+              }
+            );
+
+            completedAppointment = confirmationResult.count
+              ? ((await this.databaseService.findAppointmentByIdSafe(payment.appointmentId)) ??
+                completedAppointment)
+              : null;
+          } else {
+            completedAppointment = null;
+          }
+        }
       }
 
-      if (incomingStatusLower === 'completed' && payment.appointmentId) {
+      if (incomingStatusLower === 'completed' && payment.appointmentId && completedAppointment) {
         void this.syncAppointmentAfterPayment({
           appointmentId: payment.appointmentId,
           clinicId: completedAppointment?.clinicId || clinicId,

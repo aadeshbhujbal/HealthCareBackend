@@ -570,7 +570,7 @@ export class UsersService {
       if (targetRole === Role.PATIENT) {
         try {
           const primaryInsurance = Array.isArray(data.insurance) ? data.insurance[0] : undefined;
-          const coverageStartDate = new Date().toISOString().slice(0, 10);
+          const coverageStartDate = formatISODateInIST(new Date());
           const mappedInsurance:
             | {
                 provider: string;

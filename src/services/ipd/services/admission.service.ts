@@ -23,6 +23,8 @@ import { LoggingService } from '@infrastructure/logging/logging.service';
 import { EventService } from '@infrastructure/events';
 import { HealthcareError, ErrorCode } from '@core/errors';
 import { HealthcareErrorsService } from '@core/errors/healthcare-errors.service';
+import { formatDateKeyInIST } from '@utils/date-time.util';
+import { startOfIstDay } from '@utils/clock.util';
 
 const ADMISSION_CACHE_PREFIX = 'ipd:admission';
 
@@ -463,13 +465,13 @@ export class AdmissionService {
 
   private async generateAdmissionNumber(clinicId: string): Promise<string> {
     const today = new Date();
-    const datePrefix = today.toISOString().slice(0, 10).replace(/-/g, '');
+    const datePrefix = formatDateKeyInIST(today).replace(/-/g, '');
 
     const todayCount = await this.db.prisma.admission.count({
       where: {
         clinicId,
         admittedAt: {
-          gte: new Date(today.getFullYear(), today.getMonth(), today.getDate()),
+          gte: startOfIstDay(today) ?? today,
         },
       },
     });

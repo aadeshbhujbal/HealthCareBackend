@@ -18,6 +18,7 @@ import {
   formatDateInIST,
   formatDateTimeInIST,
   formatDateKeyInIST,
+  IST_TIMEZONE,
   nowIso,
 } from '../../libs/utils/date-time.util';
 
@@ -485,7 +486,7 @@ export class AppointmentsService {
     await this.processNoShowCancellations();
   }
 
-  @Cron(CronExpression.EVERY_DAY_AT_7AM, { timeZone: 'Asia/Kolkata' })
+  @Cron(CronExpression.EVERY_DAY_AT_7AM, { timeZone: IST_TIMEZONE })
   async handleDoctorDailyAppointmentSummaryCron() {
     await this.triggerDoctorDailySummary({ triggeredBy: 'cron' });
   }
@@ -500,7 +501,7 @@ export class AppointmentsService {
     const triggeredBy = opts.triggeredBy || 'manual';
 
     const istDay = new Date(
-      new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })
+      new Date().toLocaleString('en-US', { timeZone: IST_TIMEZONE })
     ).getDay();
     if (istDay === 0 || istDay === 6) {
       void this.loggingService.log(
@@ -2724,6 +2725,14 @@ export class AppointmentsService {
     }
 
     if (String(appointment.type) === 'VIDEO_CALL') {
+      if (String(appointment.status).toUpperCase() !== String(AppointmentStatus.CONFIRMED)) {
+        throw this.errors.validationError(
+          'status',
+          'Only confirmed video appointments can be rescheduled.',
+          'AppointmentsService.rescheduleAppointment'
+        );
+      }
+
       const rescheduleDeadline = this.resolveVideoAppointmentRescheduleDeadline({
         date: appointment.date,
         time: appointment.time,
