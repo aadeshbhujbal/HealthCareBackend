@@ -214,7 +214,7 @@ export class EmailQueueService {
         priority: this.getPriorityValue(emailData.priority),
         removeOnComplete: options?.removeOnComplete || 50,
         removeOnFail: options?.removeOnFail || 20,
-      });
+      } as Parameters<typeof this.emailQueue.add>[2]);
 
       void this.loggingService.log(
         LogType.QUEUE,

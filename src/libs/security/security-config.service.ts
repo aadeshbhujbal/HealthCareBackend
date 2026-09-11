@@ -476,10 +476,7 @@ export class SecurityConfigService {
 
     // Use Reflect.apply to call method with proper 'this' binding - avoids ESLint unbound-method warning
     const methodName: keyof IFastifyFrameworkAdapter = 'registerCookie';
-    const method = adapter[methodName];
-    if (typeof method !== 'function') {
-      throw new Error('registerCookie is not a function');
-    }
+    const method = adapter[methodName].bind(adapter);
     await Reflect.apply(method, adapter, [app, cookieOptions]);
   }
 
@@ -626,7 +623,7 @@ export class SecurityConfigService {
 
     // Use Reflect.apply to call method with proper 'this' binding - avoids ESLint unbound-method warning
     const methodName: keyof IFastifyFrameworkAdapter = 'registerSession';
-    const method = adapter[methodName];
+    const method = adapter[methodName].bind(adapter);
     if (typeof method !== 'function') {
       throw new Error('registerSession is not a function');
     }
