@@ -24,7 +24,12 @@ import {
 } from '@core/types';
 import { JobType } from '@core/types/queue.types';
 // Future use: BULK_INVOICE_QUEUE, PAYMENT_RECONCILIATION_QUEUE
-import { SubscriptionStatus, InvoiceStatus, PaymentStatus } from '@core/types/enums.types';
+import {
+  SubscriptionStatus,
+  InvoiceStatus,
+  PaymentStatus,
+  AppointmentQueueCategory,
+} from '@core/types/enums.types';
 import {
   CreateBillingPlanDto,
   UpdateBillingPlanDto,
@@ -56,8 +61,8 @@ import type {
   RefundResult,
 } from '@core/types/payment.types';
 import { PaymentProvider } from '@core/types/payment.types';
-import { formatDateInIST, nowIso } from '../../libs/utils/date-time.util';
-import { formatCurrencyFromMinorUnits } from '../../libs/utils/currency.util';
+import { formatDateInIST, nowIso } from '@utils/date-time.util';
+import { formatCurrencyFromMinorUnits } from '@utils/currency.util';
 
 // Import centralized types
 import type {
@@ -1506,10 +1511,7 @@ export class BillingService implements OnModuleInit {
   private async createInvoiceRecordAtomically(data: CreateInvoiceDto, totalAmount: number) {
     return this.databaseService.executeHealthcareWrite(
       async client => {
-        const typedClient = client as unknown as PrismaTransactionClientWithDelegates & {
-          $executeRawUnsafe: (query: string, ...values: unknown[]) => Promise<number>;
-          $queryRawUnsafe: <T = unknown>(query: string, ...values: unknown[]) => Promise<T>;
-        };
+        const typedClient = client as unknown as PrismaTransactionClientWithDelegates;
 
         // Allocate invoice number within transaction - uses advisory lock internally
         // to serialize concurrent requests and prevent duplicate invoice numbers
@@ -1524,7 +1526,7 @@ export class BillingService implements OnModuleInit {
             tax: data.tax || 0,
             discount: data.discount || 0,
             totalAmount,
-            status: InvoiceStatus.OPEN,
+            status: InvoiceStatus.DRAFT,
             dueDate: new Date(data.dueDate),
             ...(data.subscriptionId && { subscriptionId: data.subscriptionId }),
             ...(data.description && { description: data.description }),
@@ -1550,26 +1552,23 @@ export class BillingService implements OnModuleInit {
   }
 
   private async allocateInvoiceNumberInTransaction(
-    typedClient: PrismaTransactionClientWithDelegates & {
-      $executeRawUnsafe: (query: string, ...values: unknown[]) => Promise<number>;
-      $queryRawUnsafe: <T = unknown>(query: string, ...values: unknown[]) => Promise<T>;
-    }
+    typedClient: PrismaTransactionClientWithDelegates
   ): Promise<string> {
-    // Serialize invoice number allocation within the transaction using advisory lock
-    // This prevents race conditions when multiple invoices are created concurrently
-    await typedClient.$executeRawUnsafe('SELECT pg_advisory_xact_lock($1)', 2026032901);
+    // Serialize invoice number allocation within the transaction using advisory lock.
+    // This prevents race conditions when multiple invoices are created concurrently.
+    // Using $executeRaw/$queryRaw template-tag form (not $unsafe variants) — the
+    // SQL here contains no user-supplied values, but the safer form is the project standard.
+    await typedClient.$executeRaw`SELECT pg_advisory_xact_lock(${2026032901})`;
 
     // Now safe to query - no other transaction can be allocating at the same time
-    const rows = await typedClient.$queryRawUnsafe<Array<{ maxSequence: number | string | null }>>(
-      `
-        SELECT COALESCE(
-          MAX(CAST(SUBSTRING("invoiceNumber" FROM '([0-9]+)$') AS INTEGER)),
-          0
-        ) AS "maxSequence"
-        FROM "Invoice"
-        WHERE "invoiceNumber" ~ '^INV-[0-9]{4}-[0-9]+$'
-      `
-    );
+    const rows = await typedClient.$queryRaw<Array<{ maxSequence: number | string | null }>>`
+      SELECT COALESCE(
+        MAX(CAST(SUBSTRING("invoiceNumber" FROM '([0-9]+)$') AS INTEGER)),
+        0
+      ) AS "maxSequence"
+      FROM "Invoice"
+      WHERE "invoiceNumber" ~ '^INV-[0-9]{4}-[0-9]+$'
+    `;
 
     const maxSequenceRaw = rows?.[0]?.maxSequence ?? 0;
     const maxSequence = Number(maxSequenceRaw);
@@ -1761,23 +1760,6 @@ export class BillingService implements OnModuleInit {
       status: InvoiceStatus.PAID,
       paidAt: new Date(),
     });
-
-    // Always regenerate the PDF after payment so the patient/WhatsApp copy
-    // shows PAID status and payment details (not the stale unpaid draft).
-    try {
-      await this.generateInvoicePDF(id);
-    } catch (error) {
-      await this.loggingService.log(
-        LogType.ERROR,
-        LogLevel.ERROR,
-        'Failed to regenerate invoice PDF after payment',
-        'BillingService',
-        {
-          invoiceId: id,
-          error: error instanceof Error ? error.message : String(error),
-        }
-      );
-    }
 
     await this.loggingService.log(
       LogType.SYSTEM,
@@ -2016,7 +1998,7 @@ export class BillingService implements OnModuleInit {
         queueCategory:
           typeof paymentMetadata['queueCategory'] === 'string'
             ? paymentMetadata['queueCategory']
-            : 'MEDICINE_DESK',
+            : AppointmentQueueCategory.MEDICINE_DESK,
         paymentStatus: 'PAID',
         pendingAmount: 0,
         queueStatus: 'PENDING',
@@ -2771,6 +2753,25 @@ export class BillingService implements OnModuleInit {
       throw new NotFoundException('Appointment not found');
     }
 
+    if (
+      [
+        AppointmentStatus.CANCELLED,
+        AppointmentStatus.EXPIRED,
+        AppointmentStatus.COMPLETED,
+      ].includes(appointment.status as AppointmentStatus)
+    ) {
+      throw new BadRequestException(
+        'This appointment is no longer payable. Please book a new appointment.'
+      );
+    }
+
+    const paymentExpiresAt = (appointment as { paymentExpiresAt?: Date | null }).paymentExpiresAt;
+    if (paymentExpiresAt && paymentExpiresAt.getTime() <= Date.now()) {
+      throw new BadRequestException(
+        'The payment window for this appointment has expired. Please book a new appointment.'
+      );
+    }
+
     const billingUserId = await this.resolveAppointmentBillingUserId(appointment);
 
     this.assertBillingEntityAccess(
@@ -3327,45 +3328,66 @@ export class BillingService implements OnModuleInit {
 
       if (incomingStatusLower === 'completed' && payment.appointmentId && completedAppointment) {
         if (String(completedAppointment.status) !== String(AppointmentStatus.CONFIRMED)) {
-          completedAppointment = await this.databaseService.executeHealthcareWrite(
-            async client => {
-              const appointmentClient = client as unknown as {
-                appointment: {
-                  update: (args: {
-                    where: { id: string };
-                    data: { status: string };
-                  }) => Promise<unknown>;
-                };
-              };
-              return (await appointmentClient.appointment.update({
-                where: { id: payment.appointmentId as string },
-                data: {
-                  status: AppointmentStatus.CONFIRMED,
-                },
-              })) as AppointmentWithRelations;
-            },
-            {
-              userId: 'system',
-              clinicId: completedAppointment.clinicId,
-              resourceType: 'APPOINTMENT',
-              operation: 'UPDATE',
-              resourceId: payment.appointmentId,
-              userRole: 'system',
-              details: {
-                reason: 'Payment callback completed',
-                paymentId: payment.id,
-                orderId,
-              },
-            }
-          );
-        }
+          const paymentExpiresAt = (completedAppointment as { paymentExpiresAt?: Date | null })
+            .paymentExpiresAt;
+          const canConfirm = !paymentExpiresAt || paymentExpiresAt.getTime() > Date.now();
 
-        completedAppointment =
-          (await this.databaseService.findAppointmentByIdSafe(payment.appointmentId)) ??
-          completedAppointment;
+          if (canConfirm) {
+            const confirmationResult = await this.databaseService.executeHealthcareWrite(
+              async client => {
+                const appointmentClient = client as unknown as {
+                  appointment: {
+                    updateMany: (args: {
+                      where: {
+                        id: string;
+                        status: { notIn: string[] };
+                        paymentExpiresAt?: { gt: Date };
+                      };
+                      data: { status: string };
+                    }) => Promise<{ count: number }>;
+                  };
+                };
+                return appointmentClient.appointment.updateMany({
+                  where: {
+                    id: payment.appointmentId as string,
+                    status: {
+                      notIn: [
+                        AppointmentStatus.CANCELLED,
+                        AppointmentStatus.EXPIRED,
+                        AppointmentStatus.COMPLETED,
+                      ],
+                    },
+                    ...(paymentExpiresAt ? { paymentExpiresAt: { gt: new Date() } } : {}),
+                  },
+                  data: { status: AppointmentStatus.CONFIRMED },
+                });
+              },
+              {
+                userId: 'system',
+                clinicId: completedAppointment.clinicId,
+                resourceType: 'APPOINTMENT',
+                operation: 'UPDATE',
+                resourceId: payment.appointmentId,
+                userRole: 'system',
+                details: {
+                  reason: 'Payment callback completed',
+                  paymentId: payment.id,
+                  orderId,
+                },
+              }
+            );
+
+            completedAppointment = confirmationResult.count
+              ? ((await this.databaseService.findAppointmentByIdSafe(payment.appointmentId)) ??
+                completedAppointment)
+              : null;
+          } else {
+            completedAppointment = null;
+          }
+        }
       }
 
-      if (incomingStatusLower === 'completed' && payment.appointmentId) {
+      if (incomingStatusLower === 'completed' && payment.appointmentId && completedAppointment) {
         void this.syncAppointmentAfterPayment({
           appointmentId: payment.appointmentId,
           clinicId: completedAppointment?.clinicId || clinicId,
@@ -4707,27 +4729,16 @@ export class BillingService implements OnModuleInit {
       discount: Number(invoice.discount ?? 0),
       total: Number(invoice.totalAmount ?? invoice.amount ?? 0),
 
-      notes: '',
-      termsAndConditions: '',
+      ...(invoice.paidAt ? { paidAt: new Date(invoice.paidAt) } : {}),
+
+      notes: `Thank you for your payment. This invoice is for ${
+        subscriptionPlanName || 'services'
+      }.`,
+      termsAndConditions:
+        'Payment is due within 30 days. Please include the invoice number with your payment.',
     };
 
-    const invoiceStatus = String(invoice.status ?? 'OPEN').toUpperCase();
-    const isPaid = invoiceStatus === 'PAID' || Boolean(invoice.paidAt);
-    const serviceLabel = subscriptionPlanName || 'services';
-
-    if (isPaid) {
-      pdfData.paidAt = new Date(
-        invoice.paidAt ?? invoice.updatedAt ?? invoice.createdAt ?? Date.now()
-      );
-      pdfData.notes = `Payment received. Thank you. This invoice is for ${serviceLabel}.`;
-      pdfData.termsAndConditions = 'This invoice has been paid in full.';
-    } else {
-      pdfData.notes = `This invoice is awaiting payment for ${serviceLabel}.`;
-      pdfData.termsAndConditions =
-        'Payment is due by the due date. Please include the invoice number with your payment.';
-    }
-
-    if (isPaid && invoice.id) {
+    if (invoice.paidAt && invoice.id) {
       const payments = await this.databaseService.findPaymentsSafe({
         invoiceId: String(invoice.id),
       });
@@ -4839,12 +4850,8 @@ export class BillingService implements OnModuleInit {
           throw new BadRequestException(`User ${userId} has no phone number`);
         }
 
-        // Always regenerate paid receipts so WhatsApp/PDF reflect PAID status.
-        // Unpaid invoices only generate when no PDF exists yet.
-        const invoiceStatus = String(invoice.status ?? '').toUpperCase();
-        const shouldRefreshPdf =
-          invoiceStatus === 'PAID' || !invoice.pdfUrl || !invoice.pdfFilePath;
-        if (shouldRefreshPdf) {
+        // Generate PDF if not already generated
+        if (!invoice.pdfUrl || !invoice.pdfFilePath) {
           await this.generateInvoicePDF(receiptId);
 
           // Fetch updated invoice
@@ -4855,10 +4862,6 @@ export class BillingService implements OnModuleInit {
           }
 
           invoice.pdfUrl = updatedInvoice.pdfUrl;
-          invoice.pdfFilePath = updatedInvoice.pdfFilePath ?? null;
-          if (updatedInvoice.paidAt) {
-            invoice.paidAt = updatedInvoice.paidAt;
-          }
         }
 
         // Send via WhatsApp - using type-safe access

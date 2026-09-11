@@ -30,7 +30,6 @@ export class SESEmailAdapter extends BaseEmailAdapter {
   private clinicId: string | undefined = undefined; // Store clinicId for multi-tenant support
 
   constructor(
-    @Inject(LoggingService)
     loggingService: LoggingService,
     @Inject(forwardRef(() => SuppressionListService))
     private readonly suppressionListService: SuppressionListService

@@ -1,7 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/swcrc",
   "jsc": {
-    "baseUrl": "./",
     "target": "es2022",
     "parser": {
       "syntax": "typescript",

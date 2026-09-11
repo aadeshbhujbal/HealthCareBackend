@@ -7,7 +7,7 @@ import { QueueService } from '@infrastructure/queue';
 import { DoctorSummaryService } from '@communication/services/doctor-summary.service';
 import { LogType, LogLevel } from '@core/types';
 import { JobType, JobPriorityLevel } from '@core/types/queue.types';
-import { formatDateKeyInIST } from '@utils/date-time.util';
+import { formatDateKeyInIST, IST_TIMEZONE } from '@utils/date-time.util';
 
 type AppointmentConfirmedEventPayload = {
   appointmentId: string;
@@ -104,7 +104,7 @@ export class DoctorAppointmentEventListener {
     // Only send event-driven summary during daytime window (12:00–18:00 IST).
     // Night bookings are included in the 7 AM cron summary instead.
     const istHour = new Date(
-      new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })
+      new Date().toLocaleString('en-US', { timeZone: IST_TIMEZONE })
     ).getHours();
     if (istHour < 12 || istHour >= 18) {
       void this.loggingService.log(

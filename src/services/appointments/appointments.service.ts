@@ -18,6 +18,7 @@ import {
   formatDateInIST,
   formatDateTimeInIST,
   formatDateKeyInIST,
+  IST_TIMEZONE,
   nowIso,
 } from '../../libs/utils/date-time.util';
 
@@ -54,9 +55,6 @@ import {
   AppointmentStatus,
   AppointmentType,
   TreatmentType,
-  AppointmentServiceCategory,
-  AppointmentQueueCategory,
-  AppointmentBillingMode,
   AppointmentServiceMetadataDto,
   AppointmentPriority,
   ProcessCheckInDto,
@@ -67,6 +65,10 @@ import {
   ConfirmVideoFinalSlotDto,
 } from '@dtos/appointment.dto';
 import { Role } from '@core/types/enums.types';
+import {
+  findTreatmentCatalogEntry,
+  getAppointmentTreatmentCatalog,
+} from '@core/types/treatment-catalog.types';
 import { isVideoCallAppointmentType } from '@core/types/appointment-guards.types';
 import { isVideoSlotAwaitingConfirmation } from './core/appointment-state-contract';
 
@@ -97,251 +99,7 @@ type AssistantDoctorCoverageAssignmentRecord = {
   isActive: boolean;
 };
 
-const TEST_APPOINTMENT_DURATION_MINUTES = 3;
 const VIDEO_APPOINTMENT_RESCHEDULE_WINDOW_HOURS = 5;
-
-const APPOINTMENT_SERVICE_CATALOG: AppointmentServiceMetadataDto[] = [
-  {
-    treatmentType: TreatmentType.GENERAL_CONSULTATION,
-    label: 'General Consultation',
-    description: 'Comprehensive health assessment and treatment planning',
-    category: AppointmentServiceCategory.CONSULTATION,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON, AppointmentType.VIDEO_CALL],
-    queueCategory: AppointmentQueueCategory.DOCTOR_CONSULTATION,
-    serviceBucket: 'GENERAL',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: true,
-    active: true,
-    videoConsultationFee: 1215,
-  },
-  {
-    treatmentType: TreatmentType.FOLLOW_UP,
-    label: 'Follow-up Consultation',
-    description: 'Progress review and treatment adjustments',
-    category: AppointmentServiceCategory.CONSULTATION,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON, AppointmentType.VIDEO_CALL],
-    queueCategory: AppointmentQueueCategory.DOCTOR_CONSULTATION,
-    serviceBucket: 'FOLLOW_UP',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: true,
-    active: true,
-    videoConsultationFee: 1215,
-  },
-  {
-    treatmentType: TreatmentType.THERAPY,
-    aliasTreatmentTypes: [TreatmentType.SURGERY],
-    label: 'Procedural Care',
-    description: 'Combined therapeutic and surgical procedure workflow',
-    category: AppointmentServiceCategory.TREATMENT,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'PROCEDURAL_CARE',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.LAB_TEST,
-    label: 'Diagnostic',
-    description: 'Combined diagnostic, imaging, and preventive care workflow',
-    category: AppointmentServiceCategory.DIAGNOSIS,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'DIAGNOSTIC',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.SPECIAL_CASE,
-    label: 'Special Case',
-    description: 'Complex, sensitive, or unusual consultation that needs tailored handling',
-    category: AppointmentServiceCategory.CONSULTATION,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON, AppointmentType.VIDEO_CALL],
-    queueCategory: AppointmentQueueCategory.DOCTOR_CONSULTATION,
-    serviceBucket: 'SPECIAL_CASE',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: true,
-    active: true,
-    videoConsultationFee: 1215,
-  },
-  {
-    treatmentType: TreatmentType.GERIATRIC_CARE,
-    label: 'Senior Citizen',
-    description: 'Care pathway tailored for senior citizens and older adults',
-    category: AppointmentServiceCategory.CONSULTATION,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON, AppointmentType.VIDEO_CALL],
-    queueCategory: AppointmentQueueCategory.DOCTOR_CONSULTATION,
-    serviceBucket: 'SENIOR_CITIZEN',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: true,
-    active: true,
-    videoConsultationFee: 1215,
-  },
-  {
-    treatmentType: TreatmentType.VIDDHAKARMA,
-    label: 'Viddhakarma',
-    description: 'Therapeutic puncture-based Ayurvedic procedural care',
-    category: AppointmentServiceCategory.SURGERY,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'VIDDHAKARMA',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.AGNIKARMA,
-    label: 'Agnikarma',
-    description: 'Therapeutic heat procedure for musculoskeletal pain relief',
-    category: AppointmentServiceCategory.SURGERY,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'AGNIKARMA',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.PANCHAKARMA,
-    label: 'Panchakarma Therapy',
-    description: 'Traditional detoxification and rejuvenation treatment',
-    category: AppointmentServiceCategory.TREATMENT,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'PANCHAKARMA',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.NADI_PARIKSHA,
-    label: 'Nadi Pariksha',
-    description: 'Traditional pulse diagnosis to assess dosha imbalances',
-    category: AppointmentServiceCategory.DIAGNOSIS,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.DOCTOR_CONSULTATION,
-    serviceBucket: 'DIAGNOSIS',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: true,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.DOSHA_ANALYSIS,
-    label: 'Ayurvedic Procedures',
-    description: 'Combined Ayurvedic procedure workflow including dosha analysis',
-    category: AppointmentServiceCategory.DIAGNOSIS,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON, AppointmentType.VIDEO_CALL],
-    queueCategory: AppointmentQueueCategory.DOCTOR_CONSULTATION,
-    serviceBucket: 'AYURVEDIC_PROCEDURES',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: true,
-    active: true,
-    videoConsultationFee: 1200,
-  },
-  {
-    treatmentType: TreatmentType.SHIRODHARA,
-    label: 'Shirodhara',
-    description: 'Continuous oil flow on the forehead for stress and anxiety care',
-    category: AppointmentServiceCategory.TREATMENT,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'SHIRODHARA',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.VIRECHANA,
-    label: 'Ayurvedic Procedures',
-    description: 'Therapeutic purgation as part of Panchakarma care',
-    category: AppointmentServiceCategory.TREATMENT,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'PANCHAKARMA',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.ABHYANGA,
-    label: 'Ayurvedic Procedures',
-    description: 'Full-body Ayurvedic therapeutic oil massage',
-    category: AppointmentServiceCategory.TREATMENT,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'ABHYANGA',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.SWEDANA,
-    label: 'Ayurvedic Procedures',
-    description: 'Herbal steam therapy for detoxification and relaxation',
-    category: AppointmentServiceCategory.TREATMENT,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'SWEDANA',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.BASTI,
-    label: 'Ayurvedic Procedures',
-    description: 'Therapeutic medicated enema under Ayurvedic care plan',
-    category: AppointmentServiceCategory.TREATMENT,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'PANCHAKARMA',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.NASYA,
-    label: 'Ayurvedic Procedures',
-    description: 'Nasal administration therapy as part of Ayurvedic treatment',
-    category: AppointmentServiceCategory.TREATMENT,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'PANCHAKARMA',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-  {
-    treatmentType: TreatmentType.RAKTAMOKSHANA,
-    label: 'Ayurvedic Procedures',
-    description: 'Therapeutic bloodletting procedure under supervised care',
-    category: AppointmentServiceCategory.SURGERY,
-    defaultDurationMinutes: TEST_APPOINTMENT_DURATION_MINUTES,
-    appointmentModes: [AppointmentType.IN_PERSON],
-    queueCategory: AppointmentQueueCategory.THERAPY_PROCEDURE,
-    serviceBucket: 'SURGICAL',
-    billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
-    assistantDoctorEligible: false,
-    active: true,
-  },
-];
 
 /**
  * Enhanced Appointments Service
@@ -728,7 +486,7 @@ export class AppointmentsService {
     await this.processNoShowCancellations();
   }
 
-  @Cron(CronExpression.EVERY_DAY_AT_7AM, { timeZone: 'Asia/Kolkata' })
+  @Cron(CronExpression.EVERY_DAY_AT_7AM, { timeZone: IST_TIMEZONE })
   async handleDoctorDailyAppointmentSummaryCron() {
     await this.triggerDoctorDailySummary({ triggeredBy: 'cron' });
   }
@@ -743,7 +501,7 @@ export class AppointmentsService {
     const triggeredBy = opts.triggeredBy || 'manual';
 
     const istDay = new Date(
-      new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })
+      new Date().toLocaleString('en-US', { timeZone: IST_TIMEZONE })
     ).getDay();
     if (istDay === 0 || istDay === 6) {
       void this.loggingService.log(
@@ -1385,46 +1143,13 @@ export class AppointmentsService {
   }
 
   getAppointmentServiceCatalog(): AppointmentServiceMetadataDto[] {
-    return APPOINTMENT_SERVICE_CATALOG.map(service => ({
-      ...service,
-      appointmentModes: [...service.appointmentModes],
-      ...(service.aliasTreatmentTypes
-        ? { aliasTreatmentTypes: [...service.aliasTreatmentTypes] }
-        : {}),
-    }));
+    return getAppointmentTreatmentCatalog() as AppointmentServiceMetadataDto[];
   }
 
   private getAppointmentServiceMetadata(
     treatmentType?: TreatmentType | string | null
   ): AppointmentServiceMetadataDto {
-    const normalizedTreatmentType = this.resolveCatalogTreatmentType(treatmentType);
-    return (
-      APPOINTMENT_SERVICE_CATALOG.find(
-        service =>
-          String(service.treatmentType) === String(normalizedTreatmentType) ||
-          service.aliasTreatmentTypes?.some(
-            alias => String(alias) === String(normalizedTreatmentType)
-          )
-      ) ||
-      APPOINTMENT_SERVICE_CATALOG.find(
-        service => service.treatmentType === TreatmentType.GENERAL_CONSULTATION
-      )!
-    );
-  }
-
-  private resolveCatalogTreatmentType(
-    treatmentType?: TreatmentType | string | null
-  ): string | null {
-    const normalized = String(treatmentType || '')
-      .trim()
-      .toUpperCase();
-    if (!normalized) {
-      return treatmentType ?? null;
-    }
-    if (normalized === String(TreatmentType.SURGERY)) {
-      return TreatmentType.THERAPY;
-    }
-    return normalized;
+    return findTreatmentCatalogEntry(treatmentType) as AppointmentServiceMetadataDto;
   }
 
   private asMetadataRecord(metadata: unknown): Record<string, unknown> {
@@ -3000,6 +2725,14 @@ export class AppointmentsService {
     }
 
     if (String(appointment.type) === 'VIDEO_CALL') {
+      if (String(appointment.status).toUpperCase() !== String(AppointmentStatus.CONFIRMED)) {
+        throw this.errors.validationError(
+          'status',
+          'Only confirmed video appointments can be rescheduled.',
+          'AppointmentsService.rescheduleAppointment'
+        );
+      }
+
       const rescheduleDeadline = this.resolveVideoAppointmentRescheduleDeadline({
         date: appointment.date,
         time: appointment.time,
@@ -3366,7 +3099,19 @@ export class AppointmentsService {
 
     const normalizedStatus = updateDto.status;
 
-    // 2. Dispatch based on new status
+    // 2. Business rule: IN_PERSON appointments must complete QR check-in
+    //    (reach CONFIRMED status) before a consultation can be started.
+    if (
+      String(appointment.type) === String(AppointmentType.IN_PERSON) &&
+      String(appointment.status).toUpperCase() !== String(AppointmentStatus.CONFIRMED)
+    ) {
+      throw this.errors.businessRuleViolation(
+        'In-person appointment is not confirmed. Patient must scan the clinic QR before the consultation can start.',
+        'AppointmentsService.updateStatus'
+      );
+    }
+
+    // 3. Dispatch based on new status
     switch (normalizedStatus) {
       case AppointmentStatus.CONFIRMED:
         return this.processCheckIn(
@@ -4540,9 +4285,6 @@ export class AppointmentsService {
     _role: string = 'USER'
   ): Promise<unknown> {
     try {
-      // Validate appointment exists in current clinic
-      await this.getAppointmentById(appointmentId, clinicId);
-
       // Hot path: Direct plugin injection for performance
       const consultationPayload = {
         operation: 'startConsultation',
