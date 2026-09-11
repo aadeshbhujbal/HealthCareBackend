@@ -64,7 +64,7 @@ export const APPOINTMENT_SERVICE_CATALOG: readonly TreatmentCatalogEntry[] = [
     billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
     assistantDoctorEligible: true,
     active: true,
-    videoConsultationFee: 1215,
+    videoConsultationFee: 1251,
   },
   {
     treatmentType: TreatmentType.FOLLOW_UP,
@@ -79,7 +79,7 @@ export const APPOINTMENT_SERVICE_CATALOG: readonly TreatmentCatalogEntry[] = [
     billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
     assistantDoctorEligible: true,
     active: true,
-    videoConsultationFee: 1215,
+    videoConsultationFee: 1251,
   },
   {
     treatmentType: TreatmentType.THERAPY,
@@ -123,7 +123,7 @@ export const APPOINTMENT_SERVICE_CATALOG: readonly TreatmentCatalogEntry[] = [
     billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
     assistantDoctorEligible: true,
     active: true,
-    videoConsultationFee: 1215,
+    videoConsultationFee: 1251,
   },
   {
     treatmentType: TreatmentType.GERIATRIC_CARE,
@@ -138,7 +138,7 @@ export const APPOINTMENT_SERVICE_CATALOG: readonly TreatmentCatalogEntry[] = [
     billingMode: AppointmentBillingMode.SUBSCRIPTION_INCLUDED,
     assistantDoctorEligible: true,
     active: true,
-    videoConsultationFee: 1215,
+    videoConsultationFee: 1251,
   },
   {
     treatmentType: TreatmentType.VIDDHAKARMA,
