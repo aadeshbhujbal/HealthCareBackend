@@ -42,7 +42,28 @@ export default function createProductionConfig(): ProductionConfig {
   validateProductionConfig();
 
   const host = getEnv(ENV_VARS.HOST) || 'localhost';
-  const resolvedBaseUrl = removeTrailingSlash(getEnv(ENV_VARS.BASE_URL) || `https://${host}`);
+  // Public API base URL. Must be supplied via one of:
+  //   BASE_URL   — explicit operator override
+  //   COOLIFY_URL  — Coolify-injected public FQDN (includes protocol)
+  //   COOLIFY_FQDN — Coolify-injected public FQDN (no protocol)
+  // HOST is intentionally excluded — in Coolify it is the bind address (0.0.0.0),
+  // not the public hostname, so using it here would produce an invalid URL.
+  const coolifyFqdn = getEnv('COOLIFY_FQDN')
+    ?.replace(/^https?:\/\//, '')
+    .replace(/\/.*$/, '');
+  const rawBaseUrl =
+    getEnv(ENV_VARS.BASE_URL) ||
+    getEnv('COOLIFY_URL') ||
+    (coolifyFqdn ? `https://${coolifyFqdn}` : undefined);
+
+  if (!rawBaseUrl) {
+    throw new Error(
+      `Cannot determine public API URL. ` +
+        `Set BASE_URL or ensure COOLIFY_URL/COOLIFY_FQDN is available in the deployment environment.`
+    );
+  }
+
+  const resolvedBaseUrl = removeTrailingSlash(rawBaseUrl);
   const resolvedApiUrl = resolvedBaseUrl;
 
   return {
@@ -145,11 +166,7 @@ export default function createProductionConfig(): ProductionConfig {
       // Use helper functions (which use dotenv) for environment variable access
       level:
         (getEnvWithDefault(ENV_VARS.LOG_LEVEL, 'info') as
-          | 'error'
-          | 'warn'
-          | 'info'
-          | 'debug'
-          | 'verbose') || 'info',
+          'error' | 'warn' | 'info' | 'debug' | 'verbose') || 'info',
       enableAuditLogs: getEnvBoolean('ENABLE_AUDIT_LOGS', true),
     },
     email: {

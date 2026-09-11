@@ -538,7 +538,7 @@ async function quickSeed() {
             qualification: 'MBBS',
             rating: 4.5,
             isAvailable: true,
-            consultationFee: 1179,
+            consultationFee: 1200,
           },
         });
       }
@@ -632,7 +632,7 @@ async function quickSeed() {
         ensureDoctor(
           `doctor.aadesh${index + 1}@example.com`,
           index,
-          aadeshLocations[Math.floor(index / 2)] || aadeshLocations[0]
+          aadeshLocations[Math.floor(index / 2)]! || aadeshLocations[0]!
         )
       )
     );
@@ -641,7 +641,7 @@ async function quickSeed() {
         ensureReceptionist(
           `receptionist.aadesh${index + 1}@example.com`,
           index,
-          aadeshLocations[index] || aadeshLocations[0]
+          aadeshLocations[index]! || aadeshLocations[0]!
         )
       )
     );
@@ -1341,7 +1341,7 @@ async function main() {
         qualification: 'MBBS',
         rating: 4.5,
         isAvailable: true,
-        consultationFee: 1179,
+        consultationFee: 1200,
       },
     }) as unknown as Promise<{ id: string }>)) as unknown as { id: string };
     (await (prisma.doctorClinic.create({
@@ -2036,12 +2036,6 @@ main()
     } catch (error) {
       console.error('Error disconnecting Prisma:', error);
     }
-    try {
-      if (pool) {
-        await pool.end();
-      }
-    } catch (error) {
-      console.error('Error closing pool:', error);
-    }
+    // Pool is managed by PrismaPg adapter in Prisma 7
     console.log('Disconnected');
   });
